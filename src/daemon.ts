@@ -13,7 +13,8 @@
 // en orden si pausar_si_offline=1, o se marcan como skipped si =0.
 
 import { CronExpressionParser } from "cron-parser";
-import { existsSync, readdirSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { execSync } from "node:child_process";
 import { sb } from "./supabase.js";
 import { connect } from "./baileys.js";
@@ -25,16 +26,21 @@ import { log } from "./logger.js";
 import type { WASocket } from "baileys";
 import type { WspTask, WspTarget, WspRunInsert, BotStatus } from "./types.js";
 
-// Si authDir está vacío y existe la env var INITIAL_AUTH_B64, decodifica
-// y extrae para bootstrappear la sesión sin tener que parear desde la
-// terminal del container (donde no podemos escanear QR).
+// Bootstrap desde INITIAL_AUTH_B64 si no hay sesión válida en authDir
+// (creds.json es la prueba real de pareo). Si hay archivos sueltos pero
+// no creds.json, son basura de pairing-attempts fallidos previos — los
+// limpiamos antes de extraer.
 function bootstrapAuth() {
   const dir = config.authDir;
-  if (existsSync(dir) && readdirSync(dir).length > 0) return;
+  if (existsSync(join(dir, "creds.json"))) return;
   const b64 = process.env.INITIAL_AUTH_B64;
   if (!b64) return;
-  log.info("Bootstrapping auth desde INITIAL_AUTH_B64...");
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  log.info("Bootstrapping auth desde INITIAL_AUTH_B64 (no se encontró creds.json)...");
+  if (existsSync(dir)) {
+    for (const f of readdirSync(dir)) rmSync(join(dir, f), { recursive: true, force: true });
+  } else {
+    mkdirSync(dir, { recursive: true });
+  }
   const tarPath = "/tmp/initial-auth.tar.gz";
   writeFileSync(tarPath, Buffer.from(b64, "base64"));
   execSync(`tar xzf ${tarPath} --strip-components=1 -C ${dir}`);
