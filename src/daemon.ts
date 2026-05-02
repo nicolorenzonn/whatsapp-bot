@@ -13,6 +13,8 @@
 // en orden si pausar_si_offline=1, o se marcan como skipped si =0.
 
 import { CronExpressionParser } from "cron-parser";
+import { existsSync, readdirSync, mkdirSync, writeFileSync } from "node:fs";
+import { execSync } from "node:child_process";
 import { sb } from "./supabase.js";
 import { connect } from "./baileys.js";
 import { syncTargets, type ChatStore } from "./sync-targets.js";
@@ -22,6 +24,22 @@ import { config } from "./config.js";
 import { log } from "./logger.js";
 import type { WASocket } from "baileys";
 import type { WspTask, WspTarget, WspRunInsert, BotStatus } from "./types.js";
+
+// Si authDir está vacío y existe la env var INITIAL_AUTH_B64, decodifica
+// y extrae para bootstrappear la sesión sin tener que parear desde la
+// terminal del container (donde no podemos escanear QR).
+function bootstrapAuth() {
+  const dir = config.authDir;
+  if (existsSync(dir) && readdirSync(dir).length > 0) return;
+  const b64 = process.env.INITIAL_AUTH_B64;
+  if (!b64) return;
+  log.info("Bootstrapping auth desde INITIAL_AUTH_B64...");
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  const tarPath = "/tmp/initial-auth.tar.gz";
+  writeFileSync(tarPath, Buffer.from(b64, "base64"));
+  execSync(`tar xzf ${tarPath} --strip-components=1 -C ${dir}`);
+  log.info(`Auth bootstrap OK: ${readdirSync(dir).length} archivos en ${dir}`);
+}
 
 let currentSock: WASocket | null = null;
 
@@ -245,6 +263,8 @@ function suscribirRealtime(): void {
 async function main() {
   log.info(`WhatsApp Broadcaster Bot v${config.botVersion} arrancando...`);
   log.info(`User ID: ${config.userId}`);
+
+  bootstrapAuth();
 
   // Healthz HTTP server — para que Railway haga healthchecks contra el
   // proceso. Devuelve 200 si Baileys está conectado, 503 si no.
