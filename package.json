@@ -1,0 +1,31 @@
+{
+  "name": "whatsapp-bot",
+  "version": "0.2.0",
+  "description": "WhatsApp Broadcaster bot service — corre 24/7 (cloud o PC), ejecuta tareas programadas vía Baileys.",
+  "private": true,
+  "type": "module",
+  "main": "dist/daemon.js",
+  "scripts": {
+    "build": "tsc",
+    "pair": "tsx src/pair.ts",
+    "start": "tsx src/daemon.ts",
+    "dev": "tsx watch src/daemon.ts",
+    "sync": "tsx src/sync-targets.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.91.1",
+    "@supabase/supabase-js": "^2.104.1",
+    "baileys": "^6.7.18",
+    "cron-parser": "^5.0.4",
+    "dotenv": "^16.4.5",
+    "pino": "^9.5.0",
+    "qrcode-terminal": "^0.12.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.4",
+    "@types/qrcode-terminal": "^0.12.2",
+    "tsx": "^4.19.1",
+    "typescript": "^5.5.4"
+  }
+}

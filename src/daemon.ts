@@ -1,0 +1,347 @@
+// Daemon principal del WhatsApp Broadcaster.
+//
+// Loop:
+//   1. Conectar a WhatsApp (reusa creds del pair).
+//   2. Sincronizar targets a Supabase (chats / grupos / canales).
+//   3. Suscribirse a Supabase Realtime para wsp_tasks (INSERT/UPDATE/DELETE).
+//   4. Cada 30s: leer tareas con next_run <= NOW(), ejecutarlas, recalcular
+//      next_run (cron-parser) y registrar el run en wsp_runs.
+//   5. Cada 60s: heartbeat a wsp_bot_status para que la UI sepa que estamos vivos.
+//
+// Si el socket se cae: Baileys reconecta solo (ver baileys.ts). Mientras
+// está caído, las tareas se acumulan; al volver, las atrasadas se ejecutan
+// en orden si pausar_si_offline=1, o se marcan como skipped si =0.
+
+import { CronExpressionParser } from "cron-parser";
+import { sb } from "./supabase.js";
+import { connect } from "./baileys.js";
+import { syncTargets, type ChatStore } from "./sync-targets.js";
+import { variarMensaje } from "./rewriter.js";
+import { startHealthzServer, setHealthInfoProvider } from "./healthz.js";
+import { config } from "./config.js";
+import { log } from "./logger.js";
+import type { WASocket } from "baileys";
+import type { WspTask, WspTarget, WspRunInsert, BotStatus } from "./types.js";
+
+let currentSock: WASocket | null = null;
+
+// In-memory store de todos los chats que Baileys nos avisó (en
+// messaging-history.set + chats.upsert/update). Lo usamos para descubrir
+// canales (@newsletter) que no aparecen en groupFetchAllParticipating.
+const chatStore: ChatStore = new Map();
+
+const TICK_MS = 30_000;
+const HEARTBEAT_MS = 60_000;
+
+// ── Heartbeat ─────────────────────────────────────────────────────────────
+async function heartbeat(numero: string | null) {
+  await sb.from("wsp_bot_status").upsert({
+    user_id: config.userId,
+    status: currentSock ? "connected" : "disconnected",
+    numero,
+    ultimo_heartbeat: new Date().toISOString(),
+    bot_version: config.botVersion,
+    error: null,
+  });
+}
+
+// ── Cálculo del próximo next_run ──────────────────────────────────────────
+function calcNextRun(task: WspTask, fromDate: Date = new Date()): Date | null {
+  if (task.cron) {
+    try {
+      const it = CronExpressionParser.parse(task.cron, {
+        currentDate: fromDate,
+        tz: task.tz,
+      });
+      return it.next().toDate();
+    } catch (e) {
+      log.warn(`Cron inválido en task ${task.id}: ${task.cron}`, e);
+      return null;
+    }
+  }
+  if (task.run_at) {
+    const at = new Date(task.run_at);
+    return at > fromDate ? at : null;
+  }
+  return null;
+}
+
+// ── Ejecución de una tarea ────────────────────────────────────────────────
+async function ejecutarTask(task: WspTask, target: WspTarget): Promise<void> {
+  const scheduledAt = task.next_run ?? new Date().toISOString();
+
+  // Si el bot está offline:
+  if (!currentSock) {
+    if (task.pausar_si_offline === 0) {
+      // Política: skip silencioso.
+      const run: WspRunInsert = {
+        user_id: config.userId,
+        task_id: task.id,
+        target_id: task.target_id,
+        scheduled_at: scheduledAt,
+        status: "skipped",
+        error: "Bot desconectado al momento del envío",
+      };
+      await sb.from("wsp_runs").insert(run);
+      log.warn(`[${task.nombre}] skipped (offline + pausar_si_offline=0)`);
+    } else {
+      // pausar_si_offline=1 → no hacemos nada acá; el próximo tick lo retoma.
+      log.info(`[${task.nombre}] postergado (offline)`);
+    }
+    return;
+  }
+
+  // Variar mensaje con IA si corresponde.
+  const mensajeFinal = task.variar_con_ia === 1
+    ? await variarMensaje(task.mensaje)
+    : task.mensaje;
+
+  let runStatus: "ok" | "error" = "ok";
+  let errorMsg: string | undefined;
+  let wspMessageId: string | undefined;
+
+  try {
+    const result = await currentSock.sendMessage(target.jid, { text: mensajeFinal });
+    wspMessageId = result?.key?.id ?? undefined;
+    log.info(`[${task.nombre}] → ${target.nombre} (${target.tipo}) ✓ msgId=${wspMessageId ?? "?"}`);
+  } catch (e) {
+    runStatus = "error";
+    errorMsg = e instanceof Error ? e.message : String(e);
+    log.error(`[${task.nombre}] falló: ${errorMsg}`);
+  }
+
+  // Registrar el run.
+  const run: WspRunInsert = {
+    user_id: config.userId,
+    task_id: task.id,
+    target_id: task.target_id,
+    scheduled_at: scheduledAt,
+    ejecutada_en: new Date().toISOString(),
+    status: runStatus,
+    mensaje_final: mensajeFinal,
+    error: errorMsg,
+    wsp_message_id: wspMessageId,
+  };
+  await sb.from("wsp_runs").insert(run);
+
+  // Calcular próxima ejecución (o limpiar si fue one-shot).
+  const next = calcNextRun(task, new Date());
+  await sb
+    .from("wsp_tasks")
+    .update({ next_run: next?.toISOString() ?? null })
+    .eq("id", task.id);
+}
+
+// ── Tick: leer tareas vencidas y ejecutarlas en orden ─────────────────────
+let tickInFlight = false;
+async function tick(): Promise<void> {
+  if (tickInFlight) return;
+  tickInFlight = true;
+  try {
+    const nowIso = new Date().toISOString();
+
+    const { data: tasks, error } = await sb
+      .from("wsp_tasks")
+      .select("*")
+      .eq("user_id", config.userId)
+      .eq("pausada", 0)
+      .not("next_run", "is", null)
+      .lte("next_run", nowIso)
+      .order("next_run", { ascending: true })
+      .limit(20);
+
+    if (error) {
+      log.error("Error leyendo tasks:", error.message);
+      return;
+    }
+    if (!tasks || tasks.length === 0) return;
+
+    log.debug(`Tick: ${tasks.length} tareas vencidas para ejecutar`);
+
+    // Cargar targets de esas tasks de una.
+    const targetIds = [...new Set(tasks.map((t) => t.target_id))];
+    const { data: targets } = await sb
+      .from("wsp_targets")
+      .select("*")
+      .eq("user_id", config.userId)
+      .in("id", targetIds);
+
+    const byId = new Map<number, WspTarget>(
+      (targets ?? []).map((t) => [t.id, t as WspTarget]),
+    );
+
+    for (const task of tasks as WspTask[]) {
+      const target = byId.get(task.target_id);
+      if (!target) {
+        log.warn(`Task ${task.id} apunta a target_id ${task.target_id} inexistente`);
+        await sb
+          .from("wsp_runs")
+          .insert({
+            user_id: config.userId,
+            task_id: task.id,
+            target_id: task.target_id,
+            scheduled_at: task.next_run ?? new Date().toISOString(),
+            status: "error",
+            error: "target inexistente",
+          } satisfies WspRunInsert);
+        // Avanzar el next_run igual para que no quede en loop.
+        const next = calcNextRun(task);
+        await sb
+          .from("wsp_tasks")
+          .update({ next_run: next?.toISOString() ?? null })
+          .eq("id", task.id);
+        continue;
+      }
+      await ejecutarTask(task, target);
+    }
+  } finally {
+    tickInFlight = false;
+  }
+}
+
+// ── Recalcular next_run cuando una task se inserta o cambia ───────────────
+async function refreshNextRunFor(taskId: number): Promise<void> {
+  const { data, error } = await sb
+    .from("wsp_tasks")
+    .select("*")
+    .eq("id", taskId)
+    .eq("user_id", config.userId)
+    .single();
+  if (error || !data) return;
+  const task = data as WspTask;
+  // Si la task no tiene next_run o quedó en el pasado, recalcular desde ahora.
+  const stale = !task.next_run || new Date(task.next_run) < new Date();
+  if (!stale) return;
+  const next = calcNextRun(task, new Date());
+  await sb
+    .from("wsp_tasks")
+    .update({ next_run: next?.toISOString() ?? null })
+    .eq("id", taskId);
+  log.debug(`task ${taskId} next_run recalculado → ${next?.toISOString() ?? "null"}`);
+}
+
+// ── Suscripción Realtime a cambios en wsp_tasks ───────────────────────────
+function suscribirRealtime(): void {
+  const channel = sb
+    .channel("wsp-tasks-changes")
+    .on(
+      "postgres_changes",
+      { event: "*", schema: "public", table: "wsp_tasks", filter: `user_id=eq.${config.userId}` },
+      (payload) => {
+        if (payload.eventType === "INSERT" || payload.eventType === "UPDATE") {
+          const id = (payload.new as { id?: number }).id;
+          if (id) void refreshNextRunFor(id);
+        }
+      },
+    )
+    .subscribe((status) => {
+      log.debug(`Realtime channel status: ${status}`);
+    });
+  // mantener vivo
+  void channel;
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────────
+async function main() {
+  log.info(`WhatsApp Broadcaster Bot v${config.botVersion} arrancando...`);
+  log.info(`User ID: ${config.userId}`);
+
+  // Healthz HTTP server — para que Railway haga healthchecks contra el
+  // proceso. Devuelve 200 si Baileys está conectado, 503 si no.
+  setHealthInfoProvider(() => ({
+    status: (currentSock ? "connected" : "disconnected") as BotStatus,
+    numero: currentSock?.user?.id?.split(":")[0]?.split("@")[0] ?? null,
+  }));
+  startHealthzServer();
+
+  await sb.from("wsp_bot_status").upsert({
+    user_id: config.userId,
+    status: "disconnected",
+    bot_version: config.botVersion,
+    ultimo_heartbeat: new Date().toISOString(),
+  });
+
+  await connect({
+    printQR: false,
+    onReady: async (sock) => {
+      currentSock = sock;
+      const numero = sock.user?.id?.split(":")[0]?.split("@")[0] ?? null;
+
+      await heartbeat(numero);
+
+      // Acumular chats vistos (incluye newsletters/canales) — Baileys los
+      // avisa por estos eventos. El store crece a medida que la sesión se
+      // hidrata; se reinicia si reiniciás el daemon.
+      sock.ev.on("messaging-history.set", (ev) => {
+        const chats = (ev as unknown as { chats?: unknown[] }).chats ?? [];
+        for (const c of chats) {
+          const chat = c as { id?: string; name?: string; subject?: string };
+          if (chat.id) chatStore.set(chat.id, { id: chat.id, name: chat.name, subject: chat.subject });
+        }
+        log.debug(`messaging-history.set: +${chats.length} chats (total: ${chatStore.size})`);
+      });
+      sock.ev.on("chats.upsert", (chats) => {
+        for (const c of chats as unknown as Array<{ id: string; name?: string; subject?: string }>) {
+          if (c.id) chatStore.set(c.id, { id: c.id, name: c.name, subject: c.subject });
+        }
+      });
+      sock.ev.on("chats.update", (updates) => {
+        for (const u of updates as unknown as Array<{ id?: string; name?: string; subject?: string }>) {
+          if (!u.id) continue;
+          const prev = chatStore.get(u.id);
+          chatStore.set(u.id, { id: u.id, name: u.name ?? prev?.name, subject: u.subject ?? prev?.subject });
+        }
+      });
+
+      // Sync inicial de targets — 8s después para dejar que Baileys termine
+      // de hidratar la lista de chats (newsletters demoran un poco más que
+      // grupos en aparecer en messaging-history.set).
+      setTimeout(() => {
+        void syncTargets(sock, chatStore).catch((e) =>
+          log.error("Sync targets falló:", e instanceof Error ? e.message : e),
+        );
+      }, 8_000);
+
+      // Re-sync periódico cada 10 min para reflejar nuevos chats/canales.
+      setInterval(() => {
+        if (currentSock) void syncTargets(currentSock, chatStore).catch(() => {});
+      }, 10 * 60_000);
+
+      // Setear listener de desconexión (lo manejamos en baileys.ts pero
+      // queremos limpiar currentSock acá para que el tick sepa).
+      sock.ev.on("connection.update", (u) => {
+        if (u.connection === "close") currentSock = null;
+        if (u.connection === "open") currentSock = sock;
+      });
+    },
+  });
+
+  // Suscripción a cambios y loop de tick.
+  suscribirRealtime();
+  setInterval(() => void tick(), TICK_MS);
+  setInterval(() => {
+    const numero = currentSock?.user?.id?.split(":")[0]?.split("@")[0] ?? null;
+    void heartbeat(numero);
+  }, HEARTBEAT_MS);
+
+  // Primer tick inmediato (después de los 5s del sync inicial).
+  setTimeout(() => void tick(), 8_000);
+
+  log.info("Daemon listo. Esperando tareas...");
+}
+
+main().catch((e) => {
+  log.error("Daemon fatal:", e instanceof Error ? e.message : e);
+  process.exit(1);
+});
+
+// Salida limpia con Ctrl+C.
+process.on("SIGINT", async () => {
+  log.info("SIGINT — cerrando...");
+  await sb.from("wsp_bot_status").upsert({
+    user_id: config.userId,
+    status: "disconnected",
+    ultimo_heartbeat: new Date().toISOString(),
+  });
+  process.exit(0);
+});
