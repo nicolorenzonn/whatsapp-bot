@@ -261,7 +261,7 @@ async function main() {
     ultimo_heartbeat: new Date().toISOString(),
   });
 
-  await connect({
+  const bootSock = await connect({
     printQR: false,
     onReady: async (sock) => {
       currentSock = sock;
@@ -315,6 +315,39 @@ async function main() {
       });
     },
   });
+
+  // ── Auto-pairing si no hay sesión ────────────────────────────────────────
+  // Cuando corremos en Railway / cloud, no hay un paso manual de `npm run
+  // pair`. Si Baileys arranca sin creds registradas Y tenemos
+  // WSP_PAIRING_PHONE seteada, pedimos el pairing code automáticamente
+  // al arrancar y lo imprimimos bien grande en logs. El user lo lee desde
+  // Railway → Deployments → ver logs y lo entra en su celular.
+  setTimeout(async () => {
+    if (bootSock.authState.creds.registered) return;
+    if (!config.pairingPhone) {
+      log.warn("Sin sesión guardada y sin WSP_PAIRING_PHONE configurado.");
+      log.warn("Setea WSP_PAIRING_PHONE en Variables (número internacional sin '+')");
+      log.warn("y redeployá para que aparezca el pairing code acá.");
+      return;
+    }
+    try {
+      const code = await bootSock.requestPairingCode(config.pairingPhone);
+      const formatted = code.match(/.{1,4}/g)?.join("-") ?? code;
+      log.info("");
+      log.info("════════════════════════════════════════════════════");
+      log.info(`  PAIRING CODE: ${formatted}`);
+      log.info("");
+      log.info("  En tu celular abrí WhatsApp y andá a:");
+      log.info("  Configuración → Dispositivos vinculados →");
+      log.info("  Vincular un dispositivo →");
+      log.info("  'Vincular con número de teléfono' (abajo) →");
+      log.info("  ingresá el código de arriba.");
+      log.info("════════════════════════════════════════════════════");
+      log.info("");
+    } catch (e) {
+      log.error("requestPairingCode falló:", e instanceof Error ? e.message : e);
+    }
+  }, 4_000);
 
   // Suscripción a cambios y loop de tick.
   suscribirRealtime();
