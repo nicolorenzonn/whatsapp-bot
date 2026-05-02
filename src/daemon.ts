@@ -349,7 +349,10 @@ async function main() {
   // al arrancar y lo imprimimos bien grande en logs. El user lo lee desde
   // Railway → Deployments → ver logs y lo entra en su celular.
   setTimeout(async () => {
-    if (bootSock.authState.creds.registered) return;
+    // Si ya estamos conectados (sock tiene user asignado) o creds ya
+    // registradas, NO pedimos pairing — pedirlo encima de una sesión
+    // activa hace que WhatsApp tire 503 → 401 y nos revoca la sesión.
+    if (currentSock?.user || bootSock.user || bootSock.authState.creds.registered) return;
     if (!config.pairingPhone) {
       log.warn("Sin sesión guardada y sin WSP_PAIRING_PHONE configurado.");
       log.warn("Setea WSP_PAIRING_PHONE en Variables (número internacional sin '+')");
