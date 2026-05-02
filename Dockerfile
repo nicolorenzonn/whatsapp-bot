@@ -16,9 +16,10 @@ RUN npm install --include=dev
 COPY tsconfig.json ./
 COPY src ./src
 
-# Donde Baileys guarda credenciales pareadas. Mapealo a un volumen
-# persistente en Railway (Settings → Volumes → mount path /app/auth).
-VOLUME /app/auth
+# Baileys guarda credenciales pareadas en /app/auth. En Railway hay que
+# montar ahí un Volume desde la UI (Settings → Volumes → mount path
+# /app/auth). El VOLUME directive de Docker no se usa porque Railway lo
+# rechaza — usa su propio sistema de volúmenes.
 
 # Puerto del healthcheck HTTP. Railway lo usa para saber si el container
 # está vivo. PORT lo inyecta Railway automáticamente; default 8080 si no.
