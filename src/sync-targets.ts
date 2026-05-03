@@ -72,24 +72,52 @@ export async function listarChats(
   }
 
   // ── 2) Canales (newsletters) ───────────────────────────────────────────
-  // Vienen del chatStore que pobla el daemon a partir de eventos. No tienen
-  // info de members en el evento — la dejamos en null. Si en el futuro
-  // queremos count exacto, hay que llamar a sock.newsletterMetadata(jid) por
-  // cada uno, pero es N requests y la mayoría devuelve métricas distintas.
+  // Los eventos messaging-history.set / chats.upsert NO traen name ni subject
+  // para newsletters — solo el JID. Hidratamos el nombre (y subscribers) con
+  // sock.newsletterMetadata("jid", id). Lo hacemos secuencial con sleep igual
+  // que la sección 3 para no rate-limitearnos. El nombre obtenido se cachea
+  // en c.name del chatStore: re-syncs siguientes (cada 10 min) son 0 fetches.
   let nCanales = 0;
+  let nHidratados = 0;
   for (const c of chatStore.values()) {
     if (!c.id?.endsWith("@newsletter")) continue;
     if (seen.has(c.id)) continue;
+
+    let nombre = c.name || c.subject;
+    let miembros: number | null = null;
+
+    if (!nombre) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const sockAny = sock as any;
+        const meta = await sockAny.newsletterMetadata("jid", c.id);
+        if (meta?.name || meta?.subject) {
+          nombre = meta.name || meta.subject;
+          c.name = nombre; // cache para próximos syncs
+          miembros = meta?.subscribers ?? meta?.subscribers_count ?? null;
+          nHidratados++;
+        }
+      } catch (e) {
+        log.warn(
+          `newsletterMetadata(${c.id}) falló:`,
+          e instanceof Error ? e.message : e,
+        );
+      }
+      await sleep(300);
+    }
+
     rows.push({
       jid: c.id,
       tipo: "canal",
-      nombre: c.name || c.subject || "(canal sin nombre)",
-      miembros: null,
+      nombre: nombre || "(canal sin nombre)",
+      miembros,
     });
     seen.add(c.id);
     nCanales++;
   }
-  log.debug(`chatStore → ${nCanales} canales (newsletters) descubiertos`);
+  log.debug(
+    `chatStore → ${nCanales} canales (newsletters), ${nHidratados} hidratados via newsletterMetadata`,
+  );
 
   // ── 3) Canales por invite code (env var NEWSLETTER_INVITES) ──────────
   // En WhatsApp Business los newsletters frecuentemente no llegan via
