@@ -16,6 +16,9 @@ import { config } from "./config.js";
 import { log } from "./logger.js";
 import type { TargetTipo } from "./types.js";
 
+// Helper: pausa entre requests para no inundar a WhatsApp
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 interface ChatRow {
   jid: string;
   tipo: TargetTipo;
@@ -87,6 +90,44 @@ export async function listarChats(
     nCanales++;
   }
   log.debug(`chatStore → ${nCanales} canales (newsletters) descubiertos`);
+
+  // ── 3) Canales por invite code (env var NEWSLETTER_INVITES) ──────────
+  // En WhatsApp Business los newsletters frecuentemente no llegan via
+  // messaging-history.set, así que el user puede pegar los invite
+  // codes/URLs en NEWSLETTER_INVITES y los fetchamos directamente.
+  if (config.newsletterInvites.length > 0) {
+    let nInvites = 0;
+    for (const invite of config.newsletterInvites) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const sockAny = sock as any;
+        const meta = await sockAny.newsletterMetadata("invite", invite);
+        const id: string | undefined = meta?.id;
+        if (!id) {
+          log.warn(`Newsletter invite ${invite}: sin ID en respuesta`);
+          continue;
+        }
+        if (seen.has(id)) continue;
+        rows.push({
+          jid: id,
+          tipo: "canal",
+          nombre: meta?.name || meta?.subject || "(canal sin nombre)",
+          miembros: meta?.subscribers ?? meta?.subscribers_count ?? null,
+        });
+        seen.add(id);
+        nInvites++;
+      } catch (e) {
+        log.warn(
+          `Newsletter invite ${invite} falló:`,
+          e instanceof Error ? e.message : e,
+        );
+      }
+      await sleep(300); // pequeño delay entre requests
+    }
+    log.info(
+      `Newsletters por invite → ${nInvites}/${config.newsletterInvites.length} OK`,
+    );
+  }
 
   return rows;
 }

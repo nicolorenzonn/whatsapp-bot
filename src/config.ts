@@ -23,6 +23,21 @@ function normalizePhone(raw: string | undefined): string | undefined {
   return raw.replace(/[^\d]/g, "");
 }
 
+// Parsea NEWSLETTER_INVITES (comma-separated). Acepta tanto invite codes
+// crudos ("0029VbAUF...") como URLs completas ("https://whatsapp.com/channel/0029...")
+// y extrae el código de la URL.
+function parseNewsletterInvites(raw: string | undefined): string[] {
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((s) => {
+      const m = s.match(/channel\/([^/?#]+)/);
+      return m ? m[1] : s;
+    });
+}
+
 export const config = {
   supabaseUrl: required("SUPABASE_URL"),
   supabaseServiceKey: required("SUPABASE_SERVICE_ROLE_KEY"),
@@ -39,6 +54,13 @@ export const config = {
   // terminal. Formato: número internacional sin "+" ni espacios.
   // Ej: 5491134567890. En local, dejalo vacío y se cae al QR.
   pairingPhone: normalizePhone(optional("WSP_PAIRING_PHONE")),
+
+  // Lista de invite codes de canales (newsletters) que el bot debe
+  // sincronizar manualmente. Útil cuando Baileys no los descubre via
+  // messaging-history.set (pasa con WhatsApp Business). Formato:
+  // URLs completas o invite codes separados por coma. Ej:
+  //   NEWSLETTER_INVITES=https://whatsapp.com/channel/0029Vb...,0029Xy...
+  newsletterInvites: parseNewsletterInvites(optional("NEWSLETTER_INVITES")),
 
   // Puerto del healthcheck HTTP. Railway lo inyecta como PORT.
   healthzPort: parseInt(optional("PORT", "8080")!, 10),
