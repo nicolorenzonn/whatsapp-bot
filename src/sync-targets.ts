@@ -199,5 +199,64 @@ export async function syncTargets(
     .map(([t, n]) => `${n} ${t}`)
     .join(", ");
   log.info(`Sincronizados ${count ?? chats.length} targets a Supabase (${summary})`);
+
+  // Backfill: hidratar canales legacy en DB que quedaron sin nombre
+  // (vinieron de syncs viejos cuando history sync estaba activo, ahora
+  // ya no aparecen en chatStore porque syncFullHistory: false).
+  await backfillCanalesSinNombre(sock).catch((e) =>
+    log.warn("backfill canales falló:", e instanceof Error ? e.message : e),
+  );
+
   return chats.length;
+}
+
+// Hidrata canales que ya están en wsp_targets pero quedaron como
+// "(canal sin nombre)". Itera la tabla, llama newsletterMetadata("jid", id)
+// para cada uno y hace UPDATE in-place. Después del primer pass exitoso,
+// las siguientes ejecuciones encuentran 0 filas y son no-op.
+async function backfillCanalesSinNombre(sock: WASocket): Promise<void> {
+  const { data, error } = await sb
+    .from("wsp_targets")
+    .select("jid")
+    .eq("user_id", config.userId)
+    .eq("tipo", "canal")
+    .ilike("nombre", "%sin nombre%");
+
+  if (error) {
+    log.warn("backfill: select falló:", error.message);
+    return;
+  }
+  if (!data || data.length === 0) return;
+
+  log.info(`backfill: ${data.length} canales sin nombre → hidratando...`);
+  let nOk = 0;
+  for (const row of data as Array<{ jid: string }>) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const sockAny = sock as any;
+      const meta = await sockAny.newsletterMetadata("jid", row.jid);
+      const nombre: string | undefined = meta?.name || meta?.subject;
+      if (nombre) {
+        const miembros: number | null =
+          meta?.subscribers ?? meta?.subscribers_count ?? null;
+        const { error: updErr } = await sb
+          .from("wsp_targets")
+          .update({ nombre, miembros })
+          .eq("user_id", config.userId)
+          .eq("jid", row.jid);
+        if (updErr) {
+          log.warn(`backfill update ${row.jid} falló:`, updErr.message);
+        } else {
+          nOk++;
+        }
+      }
+    } catch (e) {
+      log.warn(
+        `backfill ${row.jid} falló:`,
+        e instanceof Error ? e.message : e,
+      );
+    }
+    await sleep(300);
+  }
+  log.info(`backfill: ${nOk}/${data.length} canales hidratados`);
 }
