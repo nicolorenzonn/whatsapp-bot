@@ -125,22 +125,45 @@ export async function listarChats(
   // codes/URLs en NEWSLETTER_INVITES y los fetchamos directamente.
   if (config.newsletterInvites.length > 0) {
     let nInvites = 0;
+    let loggedSample = false;
     for (const invite of config.newsletterInvites) {
       try {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const sockAny = sock as any;
         const meta = await sockAny.newsletterMetadata("invite", invite);
+
+        // Diagnóstico: loggear el shape real del primer invite del lote
+        // (solo uno para no spamear). Sirve para detectar en qué campo
+        // viene el nombre — en algunas versiones está en thread_metadata.
+        if (!loggedSample && meta) {
+          log.info(
+            `[shape] newsletterMetadata("invite") → ${JSON.stringify(meta).slice(0, 600)}`,
+          );
+          loggedSample = true;
+        }
+
         const id: string | undefined = meta?.id;
         if (!id) {
           log.warn(`Newsletter invite ${invite}: sin ID en respuesta`);
           continue;
         }
         if (seen.has(id)) continue;
+        // Probar todos los paths conocidos donde Baileys puede poner el nombre
+        const nombre =
+          meta?.name ||
+          meta?.subject ||
+          meta?.thread_metadata?.name ||
+          meta?.title ||
+          "(canal sin nombre)";
         rows.push({
           jid: id,
           tipo: "canal",
-          nombre: meta?.name || meta?.subject || "(canal sin nombre)",
-          miembros: meta?.subscribers ?? meta?.subscribers_count ?? null,
+          nombre,
+          miembros:
+            meta?.subscribers ??
+            meta?.subscribers_count ??
+            meta?.thread_metadata?.subscribers_count ??
+            null,
         });
         seen.add(id);
         nInvites++;
@@ -220,6 +243,7 @@ async function backfillCanalesSinNombre(sock: WASocket): Promise<void> {
     .select("jid")
     .eq("user_id", config.userId)
     .eq("tipo", "canal")
+    .eq("activo", 1) // los que ya marcamos inactivos no se reintentan
     .ilike("nombre", "%sin nombre%");
 
   if (error) {
@@ -230,15 +254,23 @@ async function backfillCanalesSinNombre(sock: WASocket): Promise<void> {
 
   log.info(`backfill: ${data.length} canales sin nombre → hidratando...`);
   let nOk = 0;
+  let nDisabled = 0;
   for (const row of data as Array<{ jid: string }>) {
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const sockAny = sock as any;
       const meta = await sockAny.newsletterMetadata("jid", row.jid);
-      const nombre: string | undefined = meta?.name || meta?.subject;
+      const nombre: string | undefined =
+        meta?.name ||
+        meta?.subject ||
+        meta?.thread_metadata?.name ||
+        meta?.title;
       if (nombre) {
         const miembros: number | null =
-          meta?.subscribers ?? meta?.subscribers_count ?? null;
+          meta?.subscribers ??
+          meta?.subscribers_count ??
+          meta?.thread_metadata?.subscribers_count ??
+          null;
         const { error: updErr } = await sb
           .from("wsp_targets")
           .update({ nombre, miembros })
@@ -251,12 +283,23 @@ async function backfillCanalesSinNombre(sock: WASocket): Promise<void> {
         }
       }
     } catch (e) {
-      log.warn(
-        `backfill ${row.jid} falló:`,
-        e instanceof Error ? e.message : e,
-      );
+      const msg = e instanceof Error ? e.message : String(e);
+      log.warn(`backfill ${row.jid} falló:`, msg);
+      // "Not Allowed" = el bot no es admin/owner del canal y WhatsApp
+      // bloquea newsletterMetadata por GraphQL. No vamos a poder hidratarlo
+      // nunca por esta vía → marcar inactivo así no se reintenta cada 10 min.
+      if (msg.includes("Not Allowed") || msg.includes("not-allowed")) {
+        const { error: updErr } = await sb
+          .from("wsp_targets")
+          .update({ activo: 0 })
+          .eq("user_id", config.userId)
+          .eq("jid", row.jid);
+        if (!updErr) nDisabled++;
+      }
     }
     await sleep(300);
   }
-  log.info(`backfill: ${nOk}/${data.length} canales hidratados`);
+  log.info(
+    `backfill: ${nOk}/${data.length} hidratados, ${nDisabled} marcados inactivos`,
+  );
 }
