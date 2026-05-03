@@ -148,11 +148,13 @@ export async function listarChats(
           continue;
         }
         if (seen.has(id)) continue;
-        // Probar todos los paths conocidos donde Baileys puede poner el nombre
+        // En Baileys 2.3000.x el nombre viene en thread_metadata.name.text
+        // (objeto {id, text, update_time}), no como string al top level.
+        // Mantengo los otros paths como fallback por si cambia entre versiones.
         const nombre =
+          meta?.thread_metadata?.name?.text ||
           meta?.name ||
           meta?.subject ||
-          meta?.thread_metadata?.name ||
           meta?.title ||
           "(canal sin nombre)";
         rows.push({
@@ -160,9 +162,9 @@ export async function listarChats(
           tipo: "canal",
           nombre,
           miembros:
+            meta?.thread_metadata?.subscribers_count ??
             meta?.subscribers ??
             meta?.subscribers_count ??
-            meta?.thread_metadata?.subscribers_count ??
             null,
         });
         seen.add(id);
@@ -261,15 +263,15 @@ async function backfillCanalesSinNombre(sock: WASocket): Promise<void> {
       const sockAny = sock as any;
       const meta = await sockAny.newsletterMetadata("jid", row.jid);
       const nombre: string | undefined =
+        meta?.thread_metadata?.name?.text ||
         meta?.name ||
         meta?.subject ||
-        meta?.thread_metadata?.name ||
         meta?.title;
       if (nombre) {
         const miembros: number | null =
+          meta?.thread_metadata?.subscribers_count ??
           meta?.subscribers ??
           meta?.subscribers_count ??
-          meta?.thread_metadata?.subscribers_count ??
           null;
         const { error: updErr } = await sb
           .from("wsp_targets")
