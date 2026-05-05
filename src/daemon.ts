@@ -69,6 +69,26 @@ async function heartbeat(numero: string | null) {
   });
 }
 
+// ── Rotación de links por día ─────────────────────────────────────────────
+// Si la task tiene links_json no vacío y el mensaje contiene {link},
+// elegimos uno en función del día calendario en Argentina (rotación cíclica
+// estable: el mismo día → mismo link).
+const TZ_AR = "America/Argentina/Buenos_Aires";
+
+function pickLinkOfDay(links: string[], at: Date = new Date()): string {
+  // "YYYY-MM-DD" en zona AR → número entero estable.
+  const ymd = at.toLocaleDateString("en-CA", { timeZone: TZ_AR });
+  const dayNum = Number(ymd.replaceAll("-", ""));
+  return links[dayNum % links.length]!;
+}
+
+function aplicarLinkDelDia(mensaje: string, links: string[]): string {
+  if (!links || links.length === 0) return mensaje;
+  if (!mensaje.includes("{link}")) return mensaje;
+  const link = pickLinkOfDay(links);
+  return mensaje.replaceAll("{link}", link);
+}
+
 // ── Cálculo del próximo next_run ──────────────────────────────────────────
 function calcNextRun(task: WspTask, fromDate: Date = new Date()): Date | null {
   if (task.cron) {
@@ -77,7 +97,16 @@ function calcNextRun(task: WspTask, fromDate: Date = new Date()): Date | null {
         currentDate: fromDate,
         tz: task.tz,
       });
-      return it.next().toDate();
+      const base = it.next().toDate();
+      // Jitter: si jitter_minutes > 0, sumamos un offset random [0, N min).
+      // Que el cron sea la hora "early bound" y el envío caiga en algún
+      // momento dentro de la ventana — anti-detección por regularidad.
+      const jitter = task.jitter_minutes ?? 0;
+      if (jitter > 0) {
+        const offsetMs = Math.floor(Math.random() * jitter * 60_000);
+        return new Date(base.getTime() + offsetMs);
+      }
+      return base;
     } catch (e) {
       log.warn(`Cron inválido en task ${task.id}: ${task.cron}`, e);
       return null;
@@ -115,10 +144,16 @@ async function ejecutarTask(task: WspTask, target: WspTarget): Promise<void> {
     return;
   }
 
-  // Variar mensaje con IA si corresponde.
+  // 1) Reemplazo del placeholder {link} con el link del día (si hay pool).
+  //    Hacemos esto ANTES del rewriter para que la URL final ya esté en el
+  //    texto y la IA la preserve byte por byte (regla del system prompt).
+  const mensajeConLink = aplicarLinkDelDia(task.mensaje, task.links_json ?? []);
+
+  // 2) Variar mensaje con IA si corresponde. Cacheado por (task, día):
+  //    si la task corre varias veces en el mismo día, reusa la misma variante.
   const mensajeFinal = task.variar_con_ia === 1
-    ? await variarMensaje(task.mensaje)
-    : task.mensaje;
+    ? await variarMensaje(mensajeConLink, task.id, task.tz)
+    : mensajeConLink;
 
   let runStatus: "ok" | "error" = "ok";
   let errorMsg: string | undefined;

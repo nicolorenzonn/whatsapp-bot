@@ -33,6 +33,17 @@ export interface WspTask {
   pausada: number;
   variar_con_ia: number;
   pausar_si_offline: number;
+  // Pool de URLs para reemplazar {link} en el mensaje. El bot elige una en
+  // función del día calendario (rotación cíclica). Si está vacío o el
+  // mensaje no contiene {link}, no se hace ningún reemplazo.
+  links_json: string[];
+  // Si > 0, al calcular next_run desde el cron le sumamos un offset random
+  // de [0, jitter_minutes) minutos. Anti-detección: que no caiga todo al
+  // mismo segundo. Solo aplica a cron, no a run_at.
+  jitter_minutes: number;
+  // Categoría libre para agrupar/filtrar (ej: "EBOOK", "CURSO"). NULL = sin
+  // categoría. El bot no la usa para nada — es solo para la UI.
+  concepto: string | null;
 }
 
 export interface WspRunInsert {
