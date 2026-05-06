@@ -258,6 +258,25 @@ async function tick(): Promise<void> {
   }
 }
 
+// Variante tolerante de calcNextRun para tasks que acaban de insertarse o
+// actualizarse (no para el path post-ejecución). Acepta run_at levemente en
+// el pasado (últimos 5 min) — caso típico: integraciones que insertan con
+// run_at=NOW(), donde por milisegundos ya pasó cuando lo procesamos por
+// Realtime. Para cron, idéntico a calcNextRun. Si run_at es muy viejo
+// (>5min en el pasado), devuelve null y la task queda como expirada.
+const RUN_AT_GRACE_MS = 5 * 60_000;
+function calcNextRunOnInsert(task: WspTask, fromDate: Date = new Date()): Date | null {
+  if (task.cron) return calcNextRun(task, fromDate);
+  if (task.run_at) {
+    const at = new Date(task.run_at);
+    const elapsed = fromDate.getTime() - at.getTime();
+    if (elapsed < 0) return at;                // run_at en el futuro → ok
+    if (elapsed < RUN_AT_GRACE_MS) return at;  // run_at recién pasado → ok, ejecutar ya
+    return null;                                // run_at viejo (>5min) → expirado
+  }
+  return null;
+}
+
 // ── Recalcular next_run cuando una task se inserta o cambia ───────────────
 async function refreshNextRunFor(taskId: number): Promise<void> {
   const { data, error } = await sb
@@ -271,7 +290,7 @@ async function refreshNextRunFor(taskId: number): Promise<void> {
   // Si la task no tiene next_run o quedó en el pasado, recalcular desde ahora.
   const stale = !task.next_run || new Date(task.next_run) < new Date();
   if (!stale) return;
-  const next = calcNextRun(task, new Date());
+  const next = calcNextRunOnInsert(task, new Date());
   await sb
     .from("wsp_tasks")
     .update({ next_run: next?.toISOString() ?? null })
