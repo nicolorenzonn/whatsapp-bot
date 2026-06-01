@@ -28,6 +28,21 @@ function fechaEnTz(tz: string): string {
   return new Date().toLocaleDateString("en-CA", { timeZone: tz });
 }
 
+// Saca "boludo" / "boluda" / "boluu" / etc. del texto, sin importar dónde
+// aparezca. Match case-insensitive con bordes laxos para cazar variantes
+// (alargues tipo "boluuu", plurales, comas pegadas). Después colapsa
+// espacios duplicados y limpia signos colgados al final.
+function limpiarBoludo(texto: string): string {
+  if (!texto) return texto;
+  const regex = /\bbolu+d?[oa]s?\b[\s,.!¡¿?…—-]*/gi;
+  return texto
+    .replace(regex, "")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\s+([,.!?…])/g, "$1")
+    .replace(/[\s,;:—-]+$/gm, "")
+    .trim();
+}
+
 export async function variarMensaje(
   original: string,
   taskId?: number,
@@ -62,6 +77,9 @@ export async function variarMensaje(
         "\"copado\", \"buenísimo\", \"está re bueno\", \"che\". Sin sobrecargar.\n" +
         "• NO uses: \"tú\", \"vosotros\", \"chévere\", \"genial\" (sonás de otro país), \"cordialmente\", " +
         "\"saludos cordiales\", lenguaje corporativo o de marketing.\n" +
+        "• PROHIBIDO usar la palabra \"boludo\" (en cualquier forma: boludo, boluda, boludos, bolu, " +
+        "boluuu, etc.). NI al final del mensaje, NI en el medio, NI como saludo. NUNCA. Es una regla " +
+        "DURA — el mensaje se rechaza si aparece.\n" +
         "• Podés arrancar informal: \"hola!\", \"ey\", \"buenas\", o directo al grano.\n\n" +
         "REGLAS DE CONTENIDO (CRÍTICAS):\n" +
         "• Mantenés EXACTAMENTE el mismo sentido y la misma información del original.\n" +
@@ -90,7 +108,10 @@ export async function variarMensaje(
       ],
     });
     const block = res.content[0];
-    const variado = block?.type === "text" ? block.text.trim() : original;
+    const rawVariado = block?.type === "text" ? block.text.trim() : original;
+    // Safety net: aunque el system prompt prohíbe "boludo", a veces Claude
+    // se zarpa igual. Filtramos cualquier ocurrencia antes de cachear.
+    const variado = limpiarBoludo(rawVariado);
 
     // Guardar en caché para reusar el resto del día.
     if (taskId !== undefined) {
