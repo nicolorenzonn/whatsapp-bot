@@ -20,6 +20,7 @@ import { sb } from "./supabase.js";
 import { connect } from "./baileys.js";
 import { syncTargets, type ChatStore } from "./sync-targets.js";
 import { variarMensaje } from "./rewriter.js";
+import { generarFraseDelDia, FRASE_PLACEHOLDER } from "./frase-motivacional.js";
 import { startHealthzServer, setHealthInfoProvider } from "./healthz.js";
 import { config } from "./config.js";
 import { log } from "./logger.js";
@@ -144,14 +145,26 @@ async function ejecutarTask(task: WspTask, target: WspTarget): Promise<void> {
     return;
   }
 
-  // 1) Reemplazo del placeholder {link} con el link del día (si hay pool).
+  // 1) Reemplazo del placeholder {{FRASE_DEL_DIA}} con la frase motivacional
+  //    generada por Claude (cacheada por taskId+día). Si el mensaje no lo
+  //    contiene, es no-op.
+  let mensajeBase = task.mensaje;
+  const tieneFrase = mensajeBase.includes(FRASE_PLACEHOLDER);
+  if (tieneFrase) {
+    const frase = await generarFraseDelDia(task.id, task.tz);
+    mensajeBase = mensajeBase.split(FRASE_PLACEHOLDER).join(frase);
+  }
+
+  // 2) Reemplazo del placeholder {link} con el link del día (si hay pool).
   //    Hacemos esto ANTES del rewriter para que la URL final ya esté en el
   //    texto y la IA la preserve byte por byte (regla del system prompt).
-  const mensajeConLink = aplicarLinkDelDia(task.mensaje, task.links_json ?? []);
+  const mensajeConLink = aplicarLinkDelDia(mensajeBase, task.links_json ?? []);
 
-  // 2) Variar mensaje con IA si corresponde. Cacheado por (task, día):
+  // 3) Variar mensaje con IA si corresponde. Cacheado por (task, día):
   //    si la task corre varias veces en el mismo día, reusa la misma variante.
-  const mensajeFinal = task.variar_con_ia === 1
+  //    Si la tarea usó {{FRASE_DEL_DIA}}, FORZAMOS variar_con_ia=0 — la frase
+  //    ya es la "variante" del día y el rewriter rompería la cita literal.
+  const mensajeFinal = task.variar_con_ia === 1 && !tieneFrase
     ? await variarMensaje(mensajeConLink, task.id, task.tz)
     : mensajeConLink;
 
