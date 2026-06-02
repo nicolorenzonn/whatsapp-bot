@@ -65,5 +65,16 @@ export const config = {
   // Puerto del healthcheck HTTP. Railway lo inyecta como PORT.
   healthzPort: parseInt(optional("PORT", "8080")!, 10),
 
-  botVersion: "0.2.0",
+  // Endpoint POST /alert — usado por GH Actions (casino-sync) para
+  // notificar fallos consecutivos del scraper de Sportsbet.
+  //   WSP_ALERT_TOKEN: token Bearer compartido con el caller. Sin esto
+  //                    el endpoint devuelve 503.
+  //   WSP_ALERT_DEFAULT_JID: número/JID destino default si el caller
+  //                          no manda `to` en el body. Acepta digits
+  //                          ("5493434650746") o JID completo
+  //                          ("5493434650746@s.whatsapp.net").
+  alertToken: optional("WSP_ALERT_TOKEN"),
+  alertDefaultJid: optional("WSP_ALERT_DEFAULT_JID"),
+
+  botVersion: "0.3.0",
 };

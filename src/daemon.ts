@@ -21,7 +21,7 @@ import { connect } from "./baileys.js";
 import { syncTargets, type ChatStore } from "./sync-targets.js";
 import { variarMensaje } from "./rewriter.js";
 import { generarFraseDelDia, FRASE_PLACEHOLDER } from "./frase-motivacional.js";
-import { startHealthzServer, setHealthInfoProvider } from "./healthz.js";
+import { startHealthzServer, setHealthInfoProvider, setAlertSender } from "./healthz.js";
 import { config } from "./config.js";
 import { log } from "./logger.js";
 import type { WASocket } from "baileys";
@@ -359,6 +359,11 @@ async function main() {
     onReady: async (sock) => {
       currentSock = sock;
       const numero = sock.user?.id?.split(":")[0]?.split("@")[0] ?? null;
+
+      // Habilitar endpoint POST /alert ahora que tenemos un socket vivo.
+      // El handler de healthz lo usa para mandar DMs cuando GH Actions
+      // notifica fallos del scraper. Se setea null en `close` event abajo.
+      setAlertSender((jid, text) => sock.sendMessage(jid, { text }));
 
       await heartbeat(numero);
 
