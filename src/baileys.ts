@@ -13,6 +13,7 @@ import {
   DisconnectReason,
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
+  Browsers,
   type WASocket,
 } from "baileys";
 import qrcode from "qrcode-terminal";
@@ -43,7 +44,11 @@ export async function connect(opts: ConnectOptions = {}): Promise<WASocket> {
     printQRInTerminal: false, // lo manejamos nosotros con qrcode-terminal
     syncFullHistory: false,
     markOnlineOnConnect: false, // que no aparezca "en línea" cuando se conecta
-    browser: ["WhatsApp Broadcaster", "Chrome", "120.0.0"],
+    // Fingerprint: WhatsApp inspecciona el browser string. El label custom
+    // "WhatsApp Broadcaster" es una bandera obvia de bot. Browsers.macOS()
+    // devuelve ["Mac OS", "Chrome", "14.4.1"] — idéntico a WhatsApp Web
+    // en macOS. Misma firma que tendría el cliente oficial.
+    browser: Browsers.macOS("Chrome"),
   });
 
   sock.ev.on("creds.update", saveCreds);

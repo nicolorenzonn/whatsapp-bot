@@ -173,6 +173,21 @@ async function ejecutarTask(task: WspTask, target: WspTarget): Promise<void> {
   let wspMessageId: string | undefined;
 
   try {
+    // Anti-detección: simular "tipeando" antes de mandar. WhatsApp Web/cliente
+    // oficial siempre publica presence "composing" mientras el usuario tipea
+    // y "paused" al terminar — un send sin presencia previa es la firma más
+    // común de un bot. Hacemos 800-2200ms de "tipeando" + cierre con "paused".
+    // Para grupos/canales no aplica (los demás miembros igual no ven typing
+    // suyo si no estás interactuando), pero no rompe nada igual.
+    const typingMs = 800 + Math.floor(Math.random() * 1400);
+    try {
+      await currentSock.sendPresenceUpdate("composing", target.jid);
+      await sleep(typingMs);
+      await currentSock.sendPresenceUpdate("paused", target.jid);
+    } catch {
+      // Si presence falla (algunos targets no la aceptan), seguimos igual.
+    }
+
     const result = await currentSock.sendMessage(target.jid, { text: mensajeFinal });
     wspMessageId = result?.key?.id ?? undefined;
     log.info(`[${task.nombre}] → ${target.nombre} (${target.tipo}) ✓ msgId=${wspMessageId ?? "?"}`);
@@ -196,6 +211,15 @@ async function ejecutarTask(task: WspTask, target: WspTarget): Promise<void> {
   };
   await sb.from("wsp_runs").insert(run);
 
+  // Auto-pause: si la task viene fallando con "forbidden" repetidos, la
+  // pauseamos. WhatsApp acumula señales de spam con cada send rechazado,
+  // y un cron que dispara cada hora a un grupo donde no podés mandar
+  // suma sin sentido. El owner reactiva manualmente en /tasks cuando
+  // tenga acceso de vuelta.
+  if (runStatus === "error" && esErrorPermanentePush(errorMsg)) {
+    await maybeAutoPause(task.id, task.nombre);
+  }
+
   // Calcular próxima ejecución (o limpiar si fue one-shot).
   const next = calcNextRun(task, new Date());
   await sb
@@ -203,6 +227,59 @@ async function ejecutarTask(task: WspTask, target: WspTarget): Promise<void> {
     .update({ next_run: next?.toISOString() ?? null })
     .eq("id", task.id);
 }
+
+// Errores que indican que el destino NO va a aceptar más mensajes hasta
+// que algo cambie (no es transitorio). Los otros (timeouts, network, etc.)
+// los reintentamos al próximo cron.
+function esErrorPermanentePush(msg: string | undefined): boolean {
+  if (!msg) return false;
+  const m = msg.toLowerCase();
+  return (
+    m.includes("forbidden") ||         // bot kickeado / canal no permite
+    m.includes("not-allowed") ||
+    m.includes("not authorized") ||
+    m.includes("user not in group") ||
+    m.includes("recipient not found")
+  );
+}
+
+// Pausa una task si tiene N=3 fallos PERMANENTES consecutivos (sin ningún
+// ok entre medio). Idempotente: si ya estaba pausada o no llegó al umbral,
+// no hace nada.
+const AUTO_PAUSE_THRESHOLD = 3;
+async function maybeAutoPause(taskId: number, taskNombre: string): Promise<void> {
+  const { data: ultimos, error } = await sb
+    .from("wsp_runs")
+    .select("status, error")
+    .eq("task_id", taskId)
+    .eq("user_id", config.userId)
+    .order("ejecutada_en", { ascending: false })
+    .limit(AUTO_PAUSE_THRESHOLD);
+  if (error) {
+    log.warn(`[auto-pause] no pude leer wsp_runs de task ${taskId}: ${error.message}`);
+    return;
+  }
+  if (!ultimos || ultimos.length < AUTO_PAUSE_THRESHOLD) return;
+  const todosFail = ultimos.every(
+    (r) => r.status === "error" && esErrorPermanentePush(r.error ?? undefined),
+  );
+  if (!todosFail) return;
+  const { error: updErr } = await sb
+    .from("wsp_tasks")
+    .update({ pausada: 1 })
+    .eq("id", taskId)
+    .eq("user_id", config.userId);
+  if (updErr) {
+    log.warn(`[auto-pause] update falló para task ${taskId}: ${updErr.message}`);
+    return;
+  }
+  log.warn(
+    `[auto-pause] task "${taskNombre}" (id=${taskId}) PAUSADA — ${AUTO_PAUSE_THRESHOLD} fallos permanentes seguidos. Reactivá manualmente en /tasks cuando recuperes acceso al destino.`,
+  );
+}
+
+// Helper local — el global vive en sync-targets.ts pero no lo exportan.
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // ── Tick: leer tareas vencidas y ejecutarlas en orden ─────────────────────
 let tickInFlight = false;
@@ -242,7 +319,16 @@ async function tick(): Promise<void> {
       (targets ?? []).map((t) => [t.id, t as WspTarget]),
     );
 
+    let nProcesadas = 0;
     for (const task of tasks as WspTask[]) {
+      // Anti-detección: entre cada send del mismo tick, esperar un random
+      // 1.5-4s. Si caen 5 tasks al mismo minuto, distribuir los envíos en
+      // vez de back-to-back. Solo aplica del 2do en adelante (la primera
+      // sale al toque).
+      if (nProcesadas > 0) {
+        const gap = 1500 + Math.floor(Math.random() * 2500);
+        await sleep(gap);
+      }
       const target = byId.get(task.target_id);
       if (!target) {
         log.warn(`Task ${task.id} apunta a target_id ${task.target_id} inexistente`);
@@ -265,6 +351,7 @@ async function tick(): Promise<void> {
         continue;
       }
       await ejecutarTask(task, target);
+      nProcesadas++;
     }
   } finally {
     tickInFlight = false;
