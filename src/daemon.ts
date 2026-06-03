@@ -27,6 +27,25 @@ import { log } from "./logger.js";
 import type { WASocket } from "baileys";
 import type { WspTask, WspTarget, WspRunInsert, BotStatus } from "./types.js";
 
+// Si WSP_FORCE_REPAIR=1, borramos el authDir entero al arrancar para
+// forzar un pairing flow desde cero. Útil cuando WhatsApp revocó la
+// sesión (código 401 / loggedOut) — las creds en el volume quedan
+// inválidas y necesitamos re-pairear. Setear esta var en Railway,
+// redeployar, leer el pairing code en logs, ingresarlo en el celular,
+// y DESPUÉS sacar la var para que no se borre la sesión cada deploy.
+function forceRepairIfRequested() {
+  if (process.env.WSP_FORCE_REPAIR !== "1") return;
+  const dir = config.authDir;
+  log.warn("WSP_FORCE_REPAIR=1 → borrando authDir para forzar re-pairing");
+  log.warn(`Path: ${dir}`);
+  if (existsSync(dir)) {
+    for (const f of readdirSync(dir)) rmSync(join(dir, f), { recursive: true, force: true });
+    log.info(`authDir limpiado. Sacá WSP_FORCE_REPAIR después de pairearlo.`);
+  } else {
+    log.info("authDir no existe — nada que limpiar, igual va a pedir pairing.");
+  }
+}
+
 // Bootstrap desde INITIAL_AUTH_B64 si no hay sesión válida en authDir
 // (creds.json es la prueba real de pareo). Si hay archivos sueltos pero
 // no creds.json, son basura de pairing-attempts fallidos previos — los
@@ -424,6 +443,10 @@ async function main() {
   log.info(`WhatsApp Broadcaster Bot v${config.botVersion} arrancando...`);
   log.info(`User ID: ${config.userId}`);
 
+  // Force re-pair PRIMERO — si el flag está prendido, dejamos authDir
+  // vacío para que el siguiente paso (bootstrap / connect) arranque sin
+  // creds y el auto-pairing pida un código nuevo.
+  forceRepairIfRequested();
   bootstrapAuth();
 
   // Healthz HTTP server — para que Railway haga healthchecks contra el

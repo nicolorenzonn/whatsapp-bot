@@ -29,6 +29,14 @@ let getInfo: () => HealthInfo = () => ({
 
 const startedAt = Date.now();
 
+// Boot grace period: devolvemos 200 a /healthz por los primeros 15 min
+// aunque el bot no esté conectado. Esto da tiempo a que un re-pairing
+// flow complete (request code → user lee logs → entra código en celu →
+// Baileys confirma). Sin esto, Railway tira healthcheck timeout (~5min)
+// y mata el deploy antes de que el user alcance a leer el código.
+// Tras los 15 min volvemos al comportamiento estricto (connected o 503).
+const BOOT_GRACE_SEC = 15 * 60;
+
 export function setHealthInfoProvider(fn: () => Omit<HealthInfo, "uptimeSec">): void {
   getInfo = () => ({ ...fn(), uptimeSec: Math.floor((Date.now() - startedAt) / 1_000) });
 }
@@ -125,11 +133,21 @@ export function startHealthzServer(): http.Server {
     }
     const info = getInfo();
     if (req.url === "/healthz" || req.url === "/") {
-      const ok = info.status === "connected";
+      // Boot grace: durante los primeros BOOT_GRACE_SEC segundos devolvemos
+      // 200 aunque no estemos conectados. Esto da tiempo a que Baileys
+      // pairee (cuando arrancamos con WSP_FORCE_REPAIR=1 + WSP_PAIRING_PHONE,
+      // el user tiene que leer el código y entrarlo en su celu). Sin grace,
+      // Railway tira el healthcheck a los ~5min y mata el deploy antes
+      // de que termine de pairear. Pasada la grace, /healthz vuelve a
+      // exigir status=connected — si el bot muere en runtime, Railway lo
+      // detecta y reinicia (que es lo que queremos).
+      const inGrace = info.uptimeSec < BOOT_GRACE_SEC;
+      const ok = info.status === "connected" || inGrace;
       res.writeHead(ok ? 200 : 503, { "Content-Type": "application/json" });
       res.end(JSON.stringify({
         ok,
         status: info.status,
+        in_boot_grace: inGrace,
         numero: info.numero,
         uptime_sec: info.uptimeSec,
         version: config.botVersion,
