@@ -5,3 +5,8 @@ auth/
 .env.local
 *.log
 .DS_Store
+
+# Sesión de Baileys serializada — NUNCA commitear, contiene claves de
+# encriptación. Se sube a Railway via INITIAL_AUTH_B64 env var.
+auth.tar.gz
+auth.tar.gz.b64
