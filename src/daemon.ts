@@ -544,40 +544,68 @@ async function main() {
     },
   });
 
-  // ── Auto-pairing si no hay sesión ────────────────────────────────────────
+  // ── Auto-pairing si no hay sesión (loop con retry) ──────────────────────
   // Cuando corremos en Railway / cloud, no hay un paso manual de `npm run
   // pair`. Si Baileys arranca sin creds registradas Y tenemos
   // WSP_PAIRING_PHONE seteada, pedimos el pairing code automáticamente
-  // al arrancar y lo imprimimos bien grande en logs. El user lo lee desde
-  // Railway → Deployments → ver logs y lo entra en su celular.
-  setTimeout(async () => {
-    // Si ya estamos conectados (sock tiene user asignado) o creds ya
-    // registradas, NO pedimos pairing — pedirlo encima de una sesión
-    // activa hace que WhatsApp tire 503 → 401 y nos revoca la sesión.
-    if (currentSock?.user || bootSock.user || bootSock.authState.creds.registered) return;
+  // al arrancar y lo imprimimos bien grande en logs.
+  //
+  // RETRY: los pairing codes duran ~60s. Si el user no alcanza a leerlo
+  // y entrarlo en el celu, expira. Para no requerir un redeploy completo,
+  // pedimos un código nuevo cada 65s mientras no estemos conectados.
+  // Cuando connection.update tire "open" arriba, cleanup limpia el
+  // intervalo y no se piden más.
+  let pairingInterval: NodeJS.Timeout | null = null;
+  let pairingAttempt = 0;
+
+  async function pedirPairingCode(): Promise<void> {
+    // Si ya estamos conectados o creds registradas, frenamos el loop —
+    // pedirlo encima de una sesión activa hace que WhatsApp tire
+    // 503 → 401 y nos revoca la sesión.
+    if (currentSock?.user || bootSock.user || bootSock.authState.creds.registered) {
+      if (pairingInterval) {
+        clearInterval(pairingInterval);
+        pairingInterval = null;
+        log.info("Pairing completado — frenando loop de códigos.");
+      }
+      return;
+    }
     if (!config.pairingPhone) {
       log.warn("Sin sesión guardada y sin WSP_PAIRING_PHONE configurado.");
       log.warn("Setea WSP_PAIRING_PHONE en Variables (número internacional sin '+')");
       log.warn("y redeployá para que aparezca el pairing code acá.");
+      if (pairingInterval) {
+        clearInterval(pairingInterval);
+        pairingInterval = null;
+      }
       return;
     }
+    pairingAttempt++;
     try {
       const code = await bootSock.requestPairingCode(config.pairingPhone);
       const formatted = code.match(/.{1,4}/g)?.join("-") ?? code;
       log.info("");
       log.info("════════════════════════════════════════════════════");
-      log.info(`  PAIRING CODE: ${formatted}`);
+      log.info(`  PAIRING CODE (intento #${pairingAttempt}): ${formatted}`);
+      log.info(`  Válido ~60s. Si expira, esperá — se regenera solo.`);
       log.info("");
       log.info("  En tu celular abrí WhatsApp y andá a:");
       log.info("  Configuración → Dispositivos vinculados →");
       log.info("  Vincular un dispositivo →");
       log.info("  'Vincular con número de teléfono' (abajo) →");
+      log.info(`  número: +${config.pairingPhone}`);
       log.info("  ingresá el código de arriba.");
       log.info("════════════════════════════════════════════════════");
       log.info("");
     } catch (e) {
       log.error("requestPairingCode falló:", e instanceof Error ? e.message : e);
     }
+  }
+
+  setTimeout(() => {
+    void pedirPairingCode();
+    // Reintentar cada 65s mientras no estemos conectados.
+    pairingInterval = setInterval(() => void pedirPairingCode(), 65_000);
   }, 4_000);
 
   // Suscripción a cambios y loop de tick.
