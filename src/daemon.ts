@@ -51,6 +51,13 @@ function forceRepairIfRequested() {
 // no creds.json, son basura de pairing-attempts fallidos previos — los
 // limpiamos antes de extraer.
 function bootstrapAuth() {
+  // Si estamos en flujo de force-repair, NUNCA bootstrappear — el intent
+  // explícito del user es pairing limpio desde cero. Re-inyectar una
+  // sesión vieja (aunque sea válida) saboteaba el flujo.
+  if (process.env.WSP_FORCE_REPAIR === "1") {
+    log.info("WSP_FORCE_REPAIR=1 → skipeo bootstrapAuth (queremos pairing limpio)");
+    return;
+  }
   const dir = config.authDir;
   if (existsSync(join(dir, "creds.json"))) return;
   const b64 = process.env.INITIAL_AUTH_B64;
@@ -61,10 +68,23 @@ function bootstrapAuth() {
   } else {
     mkdirSync(dir, { recursive: true });
   }
-  const tarPath = "/tmp/initial-auth.tar.gz";
-  writeFileSync(tarPath, Buffer.from(b64, "base64"));
-  execSync(`tar xzf ${tarPath} --strip-components=1 -C ${dir}`);
-  log.info(`Auth bootstrap OK: ${readdirSync(dir).length} archivos en ${dir}`);
+  // Si la b64 está corrupta o el tar falla por cualquier motivo, NO
+  // queremos matar el daemon — preferimos seguir con authDir vacío y
+  // que el auto-pairing pida un código nuevo. Antes (sin try/catch) un
+  // INITIAL_AUTH_B64 corrupto crasheaba el container en loop y Railway
+  // nunca lograba healthcheck.
+  try {
+    const tarPath = "/tmp/initial-auth.tar.gz";
+    writeFileSync(tarPath, Buffer.from(b64, "base64"));
+    execSync(`tar xzf ${tarPath} --strip-components=1 -C ${dir}`);
+    log.info(`Auth bootstrap OK: ${readdirSync(dir).length} archivos en ${dir}`);
+  } catch (e) {
+    log.warn("INITIAL_AUTH_B64 corrupta o tar inválido — sigo con authDir vacío.");
+    log.warn(`Error: ${e instanceof Error ? e.message : e}`);
+    log.warn("El auto-pairing va a pedir un código nuevo si WSP_PAIRING_PHONE está seteada.");
+    // Aseguramos que authDir exista para que useMultiFileAuthState no falle.
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  }
 }
 
 let currentSock: WASocket | null = null;
