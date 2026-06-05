@@ -31,11 +31,16 @@ export const INVALIDATED_FLAG = ".invalidated";
 
 export interface ConnectOptions {
   // Si es true, mostramos el QR en consola cuando aparece (modo pairing).
-  // Si es false (modo daemon), el QR no debería aparecer porque ya hay
-  // sesión guardada — si aparece, es un error fatal y la app exit-ea.
+  // Si es false (modo daemon), suprimimos el QR — preferimos pairing code.
   printQR?: boolean;
   // Se llama cuando el socket queda "open" — lista para recibir/enviar.
   onReady?: (sock: WASocket) => void;
+  // Si está seteado Y no hay creds registradas, pedimos pairing code
+  // inmediatamente después de makeWASocket (NO después). La API de
+  // Baileys requiere que requestPairingCode se llame antes de que el
+  // socket entre en flujo de QR, sino los dos flujos se pisan y
+  // WhatsApp tira "código incorrecto".
+  pairingPhone?: string;
 }
 
 export async function connect(opts: ConnectOptions = {}): Promise<WASocket> {
@@ -60,26 +65,76 @@ export async function connect(opts: ConnectOptions = {}): Promise<WASocket> {
 
   sock.ev.on("creds.update", saveCreds);
 
+  // ── Pairing code (INMEDIATAMENTE post-makeWASocket) ─────────────────────
+  // CRÍTICO: Baileys requiere que requestPairingCode se llame ANTES de que
+  // el socket genere el primer QR. Si esperamos, los dos flujos se pisan y
+  // los códigos generados son inválidos. Por eso esto va acá, no en un
+  // setTimeout del daemon.
+  //
+  // Retry: el código dura ~60s. Mientras no estemos conectados, pedimos uno
+  // nuevo cada 65s. El interval se limpia en connection="open".
+  let pairingInterval: NodeJS.Timeout | null = null;
+  let pairingAttempt = 0;
+  const requestPairing = async (): Promise<void> => {
+    if (!opts.pairingPhone) return;
+    if (sock.authState.creds.registered) return; // ya pareado, no pidas más
+    pairingAttempt++;
+    try {
+      const code = await sock.requestPairingCode(opts.pairingPhone);
+      const formatted = code.match(/.{1,4}/g)?.join("-") ?? code;
+      log.info("");
+      log.info("════════════════════════════════════════════════════");
+      log.info(`  PAIRING CODE (intento #${pairingAttempt}): ${formatted}`);
+      log.info(`  Válido ~60s. Si expira, esperá 65s — se regenera solo.`);
+      log.info("");
+      log.info(`  Número esperado: +${opts.pairingPhone}`);
+      log.info("  En tu celu: WhatsApp → Configuración →");
+      log.info("  Dispositivos vinculados → Vincular un dispositivo →");
+      log.info("  'Vincular con número de teléfono' (botón chico abajo) →");
+      log.info("  ingresá el número y después el código de arriba.");
+      log.info("════════════════════════════════════════════════════");
+      log.info("");
+    } catch (e) {
+      log.error("requestPairingCode falló:", e instanceof Error ? e.message : e);
+    }
+  };
+  if (opts.pairingPhone && !sock.authState.creds.registered) {
+    // Fire-and-forget para no bloquear el resto del setup, pero al toque
+    // sin setTimeout — Baileys ya internamente espera el handshake.
+    void requestPairing();
+    pairingInterval = setInterval(() => void requestPairing(), 65_000);
+  }
+
   sock.ev.on("connection.update", (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    if (qr && opts.printQR) {
+    // En modo pairing-code el QR sigue generándose internamente — lo
+    // ignoramos silenciosamente. Solo mostramos QR si el caller pidió
+    // printQR (modo pair manual local).
+    if (qr && opts.printQR && !opts.pairingPhone) {
       log.info("Escaneá este QR desde WhatsApp → Dispositivos vinculados:");
       qrcode.generate(qr, { small: true });
-    } else if (qr && !opts.printQR) {
-      // En modo daemon no debería aparecer — las creds están vencidas.
-      log.error(
-        "Apareció un QR en modo daemon — la sesión expiró. Corré `npm run pair` y reescaneá.",
-      );
     }
+    // Si hay pairingPhone, NO loggeamos nada sobre QR — usamos pairing code.
 
     if (connection === "open") {
+      // Pareado/conectado — apagamos el loop de pairing si estaba activo.
+      if (pairingInterval) {
+        clearInterval(pairingInterval);
+        pairingInterval = null;
+        log.info("Pairing completado — frenando loop de códigos.");
+      }
       const me = sock.user;
       log.info(`Conectado como ${me?.id ?? "?"} (${me?.name ?? me?.verifiedName ?? "sin nombre"})`);
       opts.onReady?.(sock);
     }
 
     if (connection === "close") {
+      // Cleanup del interval de pairing si quedó vivo.
+      if (pairingInterval) {
+        clearInterval(pairingInterval);
+        pairingInterval = null;
+      }
       // Boom error con .output.statusCode — el shape de Baileys.
       const err = lastDisconnect?.error as { output?: { statusCode?: number } } | undefined;
       const code = err?.output?.statusCode;
