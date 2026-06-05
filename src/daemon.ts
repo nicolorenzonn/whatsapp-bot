@@ -28,22 +28,45 @@ import { log } from "./logger.js";
 import type { WASocket } from "baileys";
 import type { WspTask, WspTarget, WspRunInsert, BotStatus } from "./types.js";
 
-// Si WSP_FORCE_REPAIR=1, borramos el authDir entero al arrancar para
-// forzar un pairing flow desde cero. Útil cuando WhatsApp revocó la
-// sesión (código 401 / loggedOut) — las creds en el volume quedan
-// inválidas y necesitamos re-pairear. Setear esta var en Railway,
-// redeployar, leer el pairing code en logs, ingresarlo en el celular,
-// y DESPUÉS sacar la var para que no se borre la sesión cada deploy.
-function forceRepairIfRequested() {
-  if (process.env.WSP_FORCE_REPAIR !== "1") return;
+// Wipe del authDir al boot, en dos situaciones:
+//
+// 1. WSP_FORCE_REPAIR=1 — flag manual del user para forzar re-pair (ej:
+//    cuando rotó el cel o quiere parear con otra cuenta).
+// 2. Existe `.invalidated` en authDir — flag escrito por baileys.ts cuando
+//    WhatsApp tira loggedOut (código 401). Mecanismo self-healing: el
+//    daemon anterior detectó que las creds están muertas y dejó esta
+//    marca; nosotros wipeamos ANTES de que useMultiFileAuthState las lea
+//    de vuelta. Sin esto, entrábamos en crash loop infinito.
+//
+// Crítico: esto corre ANTES de bootstrapAuth y de connect(). Si esperamos
+// a que Baileys cargue las creds malas y tire 401 de nuevo, perdimos un
+// ciclo (al menos 60-120s en Railway).
+function maybeWipeAuthDir() {
   const dir = config.authDir;
-  log.warn("WSP_FORCE_REPAIR=1 → borrando authDir para forzar re-pairing");
-  log.warn(`Path: ${dir}`);
+  const flag = join(dir, ".invalidated");
+  const forceRepair = process.env.WSP_FORCE_REPAIR === "1";
+  const hasInvalidatedFlag = existsSync(flag);
+
+  if (!forceRepair && !hasInvalidatedFlag) return;
+
+  if (forceRepair) {
+    log.warn("WSP_FORCE_REPAIR=1 → wipeando authDir para forzar re-pairing");
+  }
+  if (hasInvalidatedFlag) {
+    log.warn(".invalidated flag presente → sesión anterior revocada por WhatsApp (401)");
+    log.warn("Wipeando authDir antes de cargar Baileys para evitar crash loop");
+  }
+
   if (existsSync(dir)) {
     for (const f of readdirSync(dir)) rmSync(join(dir, f), { recursive: true, force: true });
-    log.info(`authDir limpiado. Sacá WSP_FORCE_REPAIR después de pairearlo.`);
+    log.info(`authDir limpiado: ${dir}`);
   } else {
-    log.info("authDir no existe — nada que limpiar, igual va a pedir pairing.");
+    mkdirSync(dir, { recursive: true });
+    log.info(`authDir creado vacío: ${dir}`);
+  }
+
+  if (forceRepair) {
+    log.info("Sacá WSP_FORCE_REPAIR de Railway después de pairearlo para no wipear en cada deploy.");
   }
 }
 
@@ -468,10 +491,15 @@ async function main() {
   log.info(`WhatsApp Broadcaster Bot v${config.botVersion} arrancando...`);
   log.info(`User ID: ${config.userId}`);
 
-  // Force re-pair PRIMERO — si el flag está prendido, dejamos authDir
-  // vacío para que el siguiente paso (bootstrap / connect) arranque sin
-  // creds y el auto-pairing pida un código nuevo.
-  forceRepairIfRequested();
+  // ORDEN IMPORTANTE:
+  //   1. maybeWipeAuthDir — chequea WSP_FORCE_REPAIR y el flag .invalidated
+  //      escrito por baileys.ts cuando WhatsApp tira loggedOut. Wipea el
+  //      authDir antes de que NADIE más lo toque.
+  //   2. bootstrapAuth — solo si NO hay creds.json (después del wipe está
+  //      vacío). Si hay INITIAL_AUTH_B64 lo extrae.
+  //   3. connect() — Baileys lee con useMultiFileAuthState. Si el authDir
+  //      está vacío después de los pasos previos, arranca pairing.
+  maybeWipeAuthDir();
   bootstrapAuth();
 
   // Healthz HTTP server — para que Railway haga healthchecks contra el

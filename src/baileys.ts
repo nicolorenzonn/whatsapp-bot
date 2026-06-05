@@ -19,8 +19,15 @@ import {
 import qrcode from "qrcode-terminal";
 import path from "node:path";
 import fs from "node:fs/promises";
+import { writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { config } from "./config.js";
 import { log } from "./logger.js";
+
+// Nombre del flag file que escribimos cuando WhatsApp tira loggedOut.
+// El daemon lo lee al boot y si existe, wipea el authDir ANTES de que
+// useMultiFileAuthState cargue las creds malas. Mecanismo atómico — no
+// depende de timing entre cleanup en shutdown y restart.
+export const INVALIDATED_FLAG = ".invalidated";
 
 export interface ConnectOptions {
   // Si es true, mostramos el QR en consola cuando aparece (modo pairing).
@@ -87,18 +94,23 @@ export async function connect(opts: ConnectOptions = {}): Promise<WASocket> {
           void connect(opts);
         }, 3_000);
       } else {
-        // Sesión revocada por WhatsApp (loggedOut, código 401). Limpiamos
-        // automáticamente el authDir antes de salir, para que el próximo
-        // restart de Railway arranque sin creds → el auto-pairing del
-        // daemon pide un código nuevo desde cero. Sin este cleanup,
-        // entrábamos en crash loop infinito (mismo creds malos → 401 →
-        // exit → restart → 401 → ...).
+        // Sesión revocada por WhatsApp (loggedOut, código 401). Escribimos
+        // un flag file sincrónico — el daemon lo lee al próximo arranque
+        // (ANTES de cargar creds) y wipea el authDir. Sync write porque
+        // process.exit no puede interrumpir un write síncrono, garantiza
+        // que el flag queda en disco. Versión async previa (clearAuth ->
+        // process.exit) tenía race conditions con el container restart de
+        // Railway donde el rm no fsync-eaba antes del kill.
         log.error("Sesión revocada por WhatsApp (loggedOut).");
-        log.error("Limpio authDir para que el próximo restart paire limpio.");
-        clearAuth().finally(() => {
-          log.error("authDir limpiado. Saliendo — Railway reinicia y arranca pairing.");
-          process.exit(1);
-        });
+        try {
+          if (!existsSync(config.authDir)) mkdirSync(config.authDir, { recursive: true });
+          writeFileSync(path.join(config.authDir, INVALIDATED_FLAG), new Date().toISOString());
+          log.error(`Flag escrito: ${path.join(config.authDir, INVALIDATED_FLAG)}`);
+          log.error("Saliendo — Railway reinicia y el daemon wipea authDir al boot antes de cargar creds.");
+        } catch (e) {
+          log.error("No pude escribir flag de invalidación:", e instanceof Error ? e.message : e);
+        }
+        process.exit(1);
       }
     }
   });
