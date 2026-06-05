@@ -65,19 +65,25 @@ export async function connect(opts: ConnectOptions = {}): Promise<WASocket> {
 
   sock.ev.on("creds.update", saveCreds);
 
-  // ── Pairing code (INMEDIATAMENTE post-makeWASocket) ─────────────────────
-  // CRÍTICO: Baileys requiere que requestPairingCode se llame ANTES de que
-  // el socket genere el primer QR. Si esperamos, los dos flujos se pisan y
-  // los códigos generados son inválidos. Por eso esto va acá, no en un
-  // setTimeout del daemon.
+  // ── Pairing code (DISPARADO POR EL PRIMER EVENTO qr) ────────────────────
+  // Patrón correcto de Baileys: esperar al primer evento qr del socket
+  // antes de llamar requestPairingCode. Ahí Baileys ya terminó el handshake
+  // websocket inicial y está listo para negociar pairing.
   //
-  // Retry: el código dura ~60s. Mientras no estemos conectados, pedimos uno
-  // nuevo cada 65s. El interval se limpia en connection="open".
+  // El fix anterior (post-makeWASocket inmediato) era demasiado temprano
+  // — el call llegaba antes del handshake y WhatsApp cerraba la conexión
+  // con "Connection Closed". Síntoma: requestPairingCode falló en todos
+  // los intentos.
+  //
+  // Retry: una vez que tiramos el primer code, refrescamos cada 65s (el
+  // código dura ~60s en WhatsApp). El interval se limpia en
+  // connection="open".
   let pairingInterval: NodeJS.Timeout | null = null;
   let pairingAttempt = 0;
+  let pairingArmed = false; // true después del primer qr → activamos retry loop
   const requestPairing = async (): Promise<void> => {
     if (!opts.pairingPhone) return;
-    if (sock.authState.creds.registered) return; // ya pareado, no pidas más
+    if (sock.authState.creds.registered) return;
     pairingAttempt++;
     try {
       const code = await sock.requestPairingCode(opts.pairingPhone);
@@ -98,24 +104,25 @@ export async function connect(opts: ConnectOptions = {}): Promise<WASocket> {
       log.error("requestPairingCode falló:", e instanceof Error ? e.message : e);
     }
   };
-  if (opts.pairingPhone && !sock.authState.creds.registered) {
-    // Fire-and-forget para no bloquear el resto del setup, pero al toque
-    // sin setTimeout — Baileys ya internamente espera el handshake.
-    void requestPairing();
-    pairingInterval = setInterval(() => void requestPairing(), 65_000);
-  }
 
   sock.ev.on("connection.update", (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    // En modo pairing-code el QR sigue generándose internamente — lo
-    // ignoramos silenciosamente. Solo mostramos QR si el caller pidió
-    // printQR (modo pair manual local).
+    // PRIMER evento qr: si tenemos pairingPhone y no estamos registrados,
+    // ahí disparamos el pairing code request (socket ya está listo).
+    // pairingArmed garantiza que el setInterval se arma una sola vez.
+    if (qr && opts.pairingPhone && !sock.authState.creds.registered && !pairingArmed) {
+      pairingArmed = true;
+      void requestPairing();
+      pairingInterval = setInterval(() => void requestPairing(), 65_000);
+    }
+
+    // Modo pair manual local: mostrar QR en terminal.
     if (qr && opts.printQR && !opts.pairingPhone) {
       log.info("Escaneá este QR desde WhatsApp → Dispositivos vinculados:");
       qrcode.generate(qr, { small: true });
     }
-    // Si hay pairingPhone, NO loggeamos nada sobre QR — usamos pairing code.
+    // En modo pairing-code, ignoramos silenciosamente los QR subsiguientes.
 
     if (connection === "open") {
       // Pareado/conectado — apagamos el loop de pairing si estaba activo.
