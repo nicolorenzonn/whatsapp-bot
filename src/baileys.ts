@@ -87,9 +87,18 @@ export async function connect(opts: ConnectOptions = {}): Promise<WASocket> {
           void connect(opts);
         }, 3_000);
       } else {
-        // Sesión inválida — limpiar para forzar pair de nuevo.
-        log.error("Sesión cerrada definitivamente. Borrá ./auth y corré `npm run pair`.");
-        process.exit(1);
+        // Sesión revocada por WhatsApp (loggedOut, código 401). Limpiamos
+        // automáticamente el authDir antes de salir, para que el próximo
+        // restart de Railway arranque sin creds → el auto-pairing del
+        // daemon pide un código nuevo desde cero. Sin este cleanup,
+        // entrábamos en crash loop infinito (mismo creds malos → 401 →
+        // exit → restart → 401 → ...).
+        log.error("Sesión revocada por WhatsApp (loggedOut).");
+        log.error("Limpio authDir para que el próximo restart paire limpio.");
+        clearAuth().finally(() => {
+          log.error("authDir limpiado. Saliendo — Railway reinicia y arranca pairing.");
+          process.exit(1);
+        });
       }
     }
   });
