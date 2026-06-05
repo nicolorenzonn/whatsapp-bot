@@ -59,3 +59,20 @@ export interface WspRunInsert {
 }
 
 export type BotStatus = "connected" | "disconnected" | "pairing" | "error";
+
+// Regla de auto-reenvío canal → comunidad/grupo. Cuando el bot ve un
+// mensaje fromMe en source_target_id, lo reenvía a dest_target_id con
+// delay random [delay_min_seconds, delay_max_seconds].
+export interface WspForward {
+  id: number;
+  user_id: string;
+  source_target_id: number;
+  dest_target_id: number;
+  enabled: number;
+  delay_min_seconds: number;
+  delay_max_seconds: number;
+  last_forwarded_at: string | null;
+  total_forwarded: number;
+  created_at: string;
+  updated_at: string;
+}

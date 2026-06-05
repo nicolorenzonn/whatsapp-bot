@@ -21,6 +21,7 @@ import { connect } from "./baileys.js";
 import { syncTargets, type ChatStore } from "./sync-targets.js";
 import { variarMensaje } from "./rewriter.js";
 import { generarFraseDelDia, FRASE_PLACEHOLDER } from "./frase-motivacional.js";
+import { startAutoForward, rebindAutoForward } from "./auto-forward.js";
 import { startHealthzServer, setHealthInfoProvider, setAlertSender } from "./healthz.js";
 import { config } from "./config.js";
 import { log } from "./logger.js";
@@ -88,6 +89,10 @@ function bootstrapAuth() {
 }
 
 let currentSock: WASocket | null = null;
+// Flag idempotente: el sistema de auto-forward se inicializa UNA sola vez
+// (carga reglas + suscripción Realtime + handler). En reconexiones
+// posteriores solo re-engancha el handler al nuevo sock.
+let autoForwardStarted = false;
 
 // In-memory store de todos los chats que Baileys nos avisó (en
 // messaging-history.set + chats.upsert/update). Lo usamos para descubrir
@@ -529,6 +534,19 @@ async function main() {
           log.error("Sync targets falló:", e instanceof Error ? e.message : e),
         );
       }, 8_000);
+
+      // Auto-reenvío canal → comunidad. La primera vez (autoForwardStarted=false)
+      // arranca el sistema entero (carga reglas + suscripción a Realtime +
+      // handler de mensajes). En reconexiones posteriores solo re-engancha el
+      // handler al nuevo sock para no duplicar la suscripción a Realtime.
+      if (!autoForwardStarted) {
+        autoForwardStarted = true;
+        void startAutoForward(sock).catch((e) =>
+          log.error("auto-forward: start falló:", e instanceof Error ? e.message : e),
+        );
+      } else {
+        rebindAutoForward(sock);
+      }
 
       // Re-sync periódico cada 10 min para reflejar nuevos chats/canales.
       setInterval(() => {
