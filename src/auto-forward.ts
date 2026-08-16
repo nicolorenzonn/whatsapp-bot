@@ -1,35 +1,26 @@
-// Auto-reenvío: replica mensajes entre targets según reglas en wsp_forwards.
+// Auto-reenvío: cuando el user postea en un canal/grupo, el bot replica
+// el mismo mensaje a otro target (típicamente canal → comunidad cuando
+// la comunidad se llena y no podés sumar gente nueva).
 //
-// Dos flujos:
+// Cómo funciona:
+//   1. Cargamos reglas desde wsp_forwards al boot + las recargamos por
+//      Supabase Realtime cuando hay INSERT/UPDATE/DELETE.
+//   2. Escuchamos sock.ev "messages.upsert" type="notify" (live, no history).
+//   3. Para cada mensaje fromMe, buscamos si su remoteJid matchea alguna
+//      regla activa. Si sí, esperamos jitter [min, max]s y reenviamos.
+//   4. Usamos { forward: msg } para que WhatsApp marque "Reenviado".
+//      Eso soporta texto + imagen + video + audio + sticker + doc — Baileys
+//      re-sube el media automáticamente.
 //
-// A) FROMME (grupos/canales propios): cuando el user postea en un target
-//    del que es admin (typically canal → comunidad cuando la comunidad se
-//    llena), el mensaje viene marcado fromMe=true en messages.upsert.
-//    Regla dispara.
-//
-// B) NEWSLETTER-TERCERO (canal que sólo seguimos): en canales de WhatsApp
-//    (JID @newsletter) solo el owner postea. Si el bot sigue un canal ajeno,
-//    los mensajes llegan con fromMe=false porque los emite otra cuenta.
-//    Aceptamos igual cuando el source de la regla es un canal (@newsletter).
-//
-// Dos modos de re-envío (por columna wsp_forwards.mode):
-//
-//   - literal: sock.sendMessage(dst, { forward: msg }) → WhatsApp marca
-//     "Reenviado". Soporta texto + imagen + video + audio + sticker + doc.
-//   - ia_rewrite: extraemos texto, lo pasamos por Claude (con ia_prompt
-//     custom o default), y publicamos como mensaje nativo. Si hay media
-//     con caption, reescribimos SOLO el caption; si es media sin caption,
-//     caemos al forward literal (nada que reescribir).
-//
-// Anti-loop: si un destino también es source de otra regla, podríamos
-// tener loop. Por ahora confiamos en que el user no arme ciclos.
+// Anti-loop: si el dest target también es source de otra regla, podríamos
+// tener un loop. Por ahora confiamos en que el user no arme ciclos
+// (la UI no debería ofrecerlos pero no lo validamos en bot).
 
 import type { WASocket, proto } from "baileys";
 import { sb } from "./supabase.js";
 import { config } from "./config.js";
 import { log } from "./logger.js";
-import { reescribirParaForward } from "./forward-rewriter.js";
-import type { ForwardMode, WspForward, WspTarget } from "./types.js";
+import type { WspForward, WspTarget } from "./types.js";
 
 // State in-memory. Indexamos forwards por source_jid para lookup O(1)
 // en cada mensaje. Los targets los guardamos aparte para mapear jid↔id.
@@ -42,8 +33,6 @@ interface Rule {
   sourceNombre: string;
   delayMin: number;
   delayMax: number;
-  mode: ForwardMode;
-  iaPrompt: string | null;
 }
 
 let rulesBySourceJid = new Map<string, Rule[]>();
@@ -105,8 +94,6 @@ async function reloadRules(): Promise<void> {
       sourceNombre: src.nombre,
       delayMin: f.delay_min_seconds,
       delayMax: f.delay_max_seconds,
-      mode: f.mode ?? "literal",
-      iaPrompt: f.ia_prompt ?? null,
     };
     const arr = newMap.get(src.jid) ?? [];
     arr.push(rule);
@@ -139,6 +126,9 @@ async function handleMessage(
   sock: WASocket,
   msg: proto.IWebMessageInfo,
 ): Promise<void> {
+  // Solo mensajes que escribimos NOSOTROS. No queremos reenviar lo que
+  // postean otros admins del canal por su cuenta.
+  if (!msg.key.fromMe) return;
   // Filtrar updates "vacíos" (read receipts, etc).
   if (!msg.message) return;
 
@@ -148,58 +138,12 @@ async function handleMessage(
   const rules = rulesBySourceJid.get(fromJid);
   if (!rules || rules.length === 0) return;
 
-  // Regla de aceptación:
-  //   - fromMe=true → siempre aceptamos (usuario posteó en un target propio)
-  //   - fromMe=false → aceptamos SOLO si el source es un @newsletter (canal
-  //     que seguimos). En canales solo el owner postea, así que el mensaje
-  //     es del canal fuente autorizado. En grupos ajenos con fromMe=false
-  //     descartamos — no queremos reenviar mensajes de otras personas en
-  //     grupos donde participamos sin ser owners.
-  const isFromNewsletterCanal = fromJid.endsWith("@newsletter");
-  if (!msg.key.fromMe && !isFromNewsletterCanal) return;
-
   for (const rule of rules) {
     // Fire and forget — cada regla corre en su propio scheduled forward.
     void runForward(sock, rule, msg).catch((e) =>
       log.error(`auto-forward: regla ${rule.id} falló:`, e instanceof Error ? e.message : e),
     );
   }
-}
-
-// Extrae texto plano de un mensaje Baileys. Cubre: text puro, extended text
-// (con menciones/links), image caption, video caption, document caption.
-// Retorna null si no hay texto útil para reescribir.
-function extraerTexto(msg: proto.IWebMessageInfo): string | null {
-  const m = msg.message;
-  if (!m) return null;
-  return (
-    m.conversation ??
-    m.extendedTextMessage?.text ??
-    m.imageMessage?.caption ??
-    m.videoMessage?.caption ??
-    m.documentMessage?.caption ??
-    null
-  );
-}
-
-// Construye un mensaje de imagen/video/documento con un caption nuevo,
-// reusando la media del original. Baileys re-sube la media automáticamente.
-function reBuildMediaWithNewCaption(
-  msg: proto.IWebMessageInfo,
-  newCaption: string,
-): Record<string, unknown> | null {
-  const m = msg.message;
-  if (!m) return null;
-  if (m.imageMessage) {
-    return { image: m.imageMessage, caption: newCaption };
-  }
-  if (m.videoMessage) {
-    return { video: m.videoMessage, caption: newCaption };
-  }
-  if (m.documentMessage) {
-    return { document: m.documentMessage, caption: newCaption };
-  }
-  return null;
 }
 
 async function runForward(
@@ -209,48 +153,12 @@ async function runForward(
 ): Promise<void> {
   const delayMs = jitterMs(rule.delayMin, rule.delayMax);
   log.info(
-    `auto-forward: regla ${rule.id} [${rule.mode}] "${rule.sourceNombre}" → "${rule.destNombre}" en ${(delayMs / 1000).toFixed(1)}s`,
+    `auto-forward: regla ${rule.id} "${rule.sourceNombre}" → "${rule.destNombre}" en ${(delayMs / 1000).toFixed(1)}s`,
   );
   await sleep(delayMs);
 
   try {
-    if (rule.mode === "ia_rewrite") {
-      // Modo IA: intentamos extraer texto (caption o mensaje puro) y
-      // reescribirlo con Claude. Casos:
-      //   - Texto puro con contenido → reescribimos y mandamos como
-      //     mensaje nativo (sin etiqueta "Reenviado").
-      //   - Media con caption → reescribimos el caption, mandamos la
-      //     media original con el caption nuevo.
-      //   - Media sin caption o sticker/audio → caemos al forward literal
-      //     (no hay texto que reescribir).
-      const original = extraerTexto(msg);
-      if (original && original.trim().length > 0) {
-        const reescrito = await reescribirParaForward(
-          rule.id,
-          original,
-          rule.iaPrompt,
-        );
-        // Si el original venía en un caption de media, reconstruimos con
-        // la misma media + nuevo caption.
-        const mediaMsg = reBuildMediaWithNewCaption(msg, reescrito);
-        if (mediaMsg) {
-          await sock.sendMessage(rule.destJid, mediaMsg as never);
-        } else {
-          // Texto puro (conversation o extendedTextMessage).
-          await sock.sendMessage(rule.destJid, { text: reescrito });
-        }
-      } else {
-        // Sin texto que reescribir (sticker, audio, media sin caption) →
-        // forward literal como fallback para no perder el mensaje.
-        log.info(
-          `auto-forward: regla ${rule.id} sin texto para reescribir — fallback a forward literal`,
-        );
-        await sock.sendMessage(rule.destJid, { forward: msg });
-      }
-    } else {
-      // Modo literal: forward tal cual, con etiqueta "Reenviado".
-      await sock.sendMessage(rule.destJid, { forward: msg });
-    }
+    await sock.sendMessage(rule.destJid, { forward: msg });
     log.info(`auto-forward: regla ${rule.id} → ${rule.destNombre} ✓`);
 
     // Actualizar contador en DB — best effort, no abortamos si falla.

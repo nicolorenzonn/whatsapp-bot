@@ -63,8 +63,6 @@ export type BotStatus = "connected" | "disconnected" | "pairing" | "error";
 // Regla de auto-reenvío canal → comunidad/grupo. Cuando el bot ve un
 // mensaje fromMe en source_target_id, lo reenvía a dest_target_id con
 // delay random [delay_min_seconds, delay_max_seconds].
-export type ForwardMode = "literal" | "ia_rewrite";
-
 export interface WspForward {
   id: number;
   user_id: string;
@@ -77,10 +75,4 @@ export interface WspForward {
   total_forwarded: number;
   created_at: string;
   updated_at: string;
-  // literal = reenvía con { forward: msg } (WhatsApp marca "Reenviado").
-  // ia_rewrite = pasa por Claude con ia_prompt (o default) y publica el
-  // resultado como mensaje nativo, sin etiqueta de reenvío. Útil para
-  // curar contenido de canales de terceros con permiso.
-  mode: ForwardMode;
-  ia_prompt: string | null;
 }
