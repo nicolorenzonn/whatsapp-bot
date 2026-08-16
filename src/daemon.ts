@@ -24,6 +24,7 @@ import { generarFraseDelDia, FRASE_PLACEHOLDER } from "./frase-motivacional.js";
 import { startAutoForward, rebindAutoForward, handleTelegramMessage } from "./auto-forward.js";
 import { connectTelegram, telegramConfigured } from "./telegram-client.js";
 import { syncTelegramTargets } from "./telegram-sync-targets.js";
+import { bindDMHandler } from "./dm-handler.js";
 import { startHealthzServer, setHealthInfoProvider, setAlertSender } from "./healthz.js";
 import { config } from "./config.js";
 import { log } from "./logger.js";
@@ -587,6 +588,11 @@ async function main() {
           log.error("Sync targets falló:", e instanceof Error ? e.message : e),
         );
       }, 8_000);
+
+      // Setter casino: escucha DMs directos y persiste conversaciones. Si
+      // SETTER_ENABLED=1 además genera drafts IA en modo shadow para VIPs.
+      // Se re-engancha en cada reconexión (idempotente — solo registra listener).
+      bindDMHandler(sock);
 
       // Auto-reenvío canal → comunidad. La primera vez (autoForwardStarted=false)
       // arranca el sistema entero (carga reglas + suscripción a Realtime +
