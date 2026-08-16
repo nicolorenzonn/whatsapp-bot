@@ -44,6 +44,7 @@ interface Rule {
   delayMax: number;
   mode: ForwardMode;
   iaPrompt: string | null;
+  destSuffix: string | null;
 }
 
 let rulesBySourceJid = new Map<string, Rule[]>();
@@ -107,6 +108,7 @@ async function reloadRules(): Promise<void> {
       delayMax: f.delay_max_seconds,
       mode: f.mode ?? "literal",
       iaPrompt: f.ia_prompt ?? null,
+      destSuffix: f.dest_suffix ?? null,
     };
     const arr = newMap.get(src.jid) ?? [];
     arr.push(rule);
@@ -215,40 +217,46 @@ async function runForward(
 
   try {
     if (rule.mode === "ia_rewrite") {
-      // Modo IA: intentamos extraer texto (caption o mensaje puro) y
-      // reescribirlo con Claude. Casos:
-      //   - Texto puro con contenido → reescribimos y mandamos como
-      //     mensaje nativo (sin etiqueta "Reenviado").
-      //   - Media con caption → reescribimos el caption, mandamos la
-      //     media original con el caption nuevo.
-      //   - Media sin caption o sticker/audio → caemos al forward literal
-      //     (no hay texto que reescribir).
+      // Modo IA: solo publicamos si Claude puede extraer contenido útil.
+      // Casos:
+      //   - Sin texto (foto sola, sticker, audio) → SKIP (no publicamos).
+      //     El user quiere que el reenvío sea SOLO cuando hay contenido
+      //     accionable/apuesta, no cualquier cosa que postee el canal.
+      //   - Con texto: Claude decide. Si el prompt lo instruye a filtrar
+      //     y decide que no es apuesta, devuelve "[SKIP]" (literal) y
+      //     tampoco publicamos.
+      //   - Texto útil: reescribe + append dest_suffix.
       const original = extraerTexto(msg);
-      if (original && original.trim().length > 0) {
-        const reescrito = await reescribirParaForward(
-          rule.id,
-          original,
-          rule.iaPrompt,
-        );
-        // Si el original venía en un caption de media, reconstruimos con
-        // la misma media + nuevo caption.
-        const mediaMsg = reBuildMediaWithNewCaption(msg, reescrito);
-        if (mediaMsg) {
-          await sock.sendMessage(rule.destJid, mediaMsg as never);
-        } else {
-          // Texto puro (conversation o extendedTextMessage).
-          await sock.sendMessage(rule.destJid, { text: reescrito });
-        }
-      } else {
-        // Sin texto que reescribir (sticker, audio, media sin caption) →
-        // forward literal como fallback para no perder el mensaje.
+      if (!original || original.trim().length === 0) {
         log.info(
-          `auto-forward: regla ${rule.id} sin texto para reescribir — fallback a forward literal`,
+          `auto-forward: regla ${rule.id} sin texto (foto/sticker/audio) — skip`,
         );
-        await sock.sendMessage(rule.destJid, { forward: msg });
+        return;
       }
+      const reescrito = await reescribirParaForward(
+        rule.id,
+        original,
+        rule.iaPrompt,
+      );
+      // Skip explícito de Claude — el prompt le da la opción de responder
+      // "[SKIP]" si el contenido no cumple criterios (ej: no es apuesta).
+      // Chequeo case-insensitive y tolerante a espacios/puntuación.
+      const normalizado = reescrito.trim().toUpperCase();
+      if (normalizado === "[SKIP]" || normalizado.startsWith("[SKIP]")) {
+        log.info(
+          `auto-forward: regla ${rule.id} Claude devolvió SKIP — no publico`,
+        );
+        return;
+      }
+      // Append dest_suffix determinístico (disclaimer / afiliación).
+      // No pasa por Claude — texto exacto, siempre igual.
+      const finalText = rule.destSuffix
+        ? `${reescrito.trim()}\n\n${rule.destSuffix.trim()}`
+        : reescrito;
+      await sock.sendMessage(rule.destJid, { text: finalText });
     } else {
       // Modo literal: forward tal cual, con etiqueta "Reenviado".
+      // (dest_suffix no se aplica en literal — el forward es copia exacta.)
       await sock.sendMessage(rule.destJid, { forward: msg });
     }
     log.info(`auto-forward: regla ${rule.id} → ${rule.destNombre} ✓`);

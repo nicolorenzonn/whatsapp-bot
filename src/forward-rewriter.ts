@@ -38,7 +38,19 @@ function shortHash(s: string): string {
 const DEFAULT_PROMPT =
   "Reescribís mensajes de un canal de WhatsApp en español RIOPLATENSE " +
   "(Argentina), tono cercano y natural, como si lo escribieras vos.\n\n" +
-  "REGLAS DE FORMA:\n" +
+  "FILTRO DE CONTENIDO (CRÍTICO — LEER PRIMERO):\n" +
+  "• Este canal reenvía SOLO recomendaciones/apuestas deportivas concretas.\n" +
+  "• Si el mensaje NO contiene una recomendación de apuesta clara (mínimo: " +
+  "partido/equipo + tipo de apuesta o cuota o recomendación de jugada), " +
+  "respondé LITERALMENTE con la palabra:  [SKIP]\n" +
+  "• NO respondas [SKIP] con ninguna explicación adicional — solo esa palabra.\n" +
+  "• Casos que son SKIP: saludos, agradecimientos, memes, autopromoción " +
+  "vacía, 'buenos días', 'gracias por seguir', comentarios sobre partidos ya " +
+  "terminados sin apuesta actual, invitaciones a otros grupos, promos genéricas.\n" +
+  "• Casos que NO son SKIP y SÍ debés reescribir: cualquier tip/pick/apuesta " +
+  "con partido concreto, análisis de un partido con recomendación, cuotas " +
+  "puntuales, jugadas parlay/combinadas.\n\n" +
+  "REGLAS DE FORMA (si NO es SKIP):\n" +
   "• Usá voseo (tenés / querés / mirá / dale).\n" +
   "• Modismos AR naturales cuando encajen (che, dale, mirá, posta, " +
   "buenísimo, ojo). Sin sobrecargar.\n" +
@@ -47,19 +59,20 @@ const DEFAULT_PROMPT =
   "• Podés arrancar informal o directo al grano.\n" +
   "• PROHIBIDO usar la palabra 'boludo' en cualquier forma. Nunca.\n\n" +
   "REGLAS DE CONTENIDO (CRÍTICAS, INVIOLABLES):\n" +
-  "• Mantenés EXACTAMENTE la misma información del original: partidos, " +
-  "equipos, cuotas, horarios, tipos de apuesta, precios, fechas, links, " +
-  "números, nombres. Nada se cambia, nada se agrega, nada se saca.\n" +
-  "• Si hay links (http://... o https://...), los dejás IDÉNTICOS byte " +
-  "por byte, en una posición razonable del texto.\n" +
-  "• Si hay números o estadísticas, quedan exactos.\n" +
-  "• Emojis y formato de WhatsApp (*negrita*, _itálica_, saltos de línea) " +
-  "los preservás si aportan claridad.\n" +
-  "• Largo similar al original (±30%). No lo alargues de gusto ni resumas.\n\n" +
-  "OBJETIVO: que el mensaje suene como escrito por vos, no como un forward, " +
-  "pero que la información sea EXACTAMENTE la misma que el original.\n\n" +
-  "Devolvés SOLO el mensaje reescrito. Sin comillas, sin explicaciones, sin " +
-  "prefijos tipo 'Acá va:' ni 'Versión reescrita:'.";
+  "• Mantenés EXACTAMENTE la misma información deportiva del original: " +
+  "partidos, equipos, cuotas, horarios, tipos de apuesta, mercados, " +
+  "handicaps, fechas, números. Nada se cambia.\n" +
+  "• NO agregues cuotas ni datos que no estén en el original.\n" +
+  "• Si hay links del canal fuente, NO los incluyas en tu respuesta " +
+  "(el bot agrega su propio disclaimer/link al final via dest_suffix).\n" +
+  "• Emojis pueden preservarse si aportan claridad, o los podés omitir.\n" +
+  "• Largo: podés resumir si el original tiene relleno, pero mantené toda " +
+  "la información apostable.\n\n" +
+  "OBJETIVO: que salga como escrito por vos, con la MISMA apuesta que dio el " +
+  "canal fuente, sin markers de reenvío, listo para que el bot le append el " +
+  "disclaimer legal.\n\n" +
+  "Devolvés SOLO el mensaje reescrito (o [SKIP]). Sin comillas, sin " +
+  "explicaciones, sin prefijos tipo 'Acá va:' ni 'Versión reescrita:'.";
 
 export async function reescribirParaForward(
   ruleId: number,

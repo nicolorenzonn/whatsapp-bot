@@ -83,4 +83,8 @@ export interface WspForward {
   // curar contenido de canales de terceros con permiso.
   mode: ForwardMode;
   ia_prompt: string | null;
+  // Sufijo determinístico que se append al final del mensaje reescrito.
+  // NO pasa por Claude (evita paráfrasis / alucinación en disclaimers
+  // legales o links de afiliación). Solo se aplica en modo ia_rewrite.
+  dest_suffix: string | null;
 }
