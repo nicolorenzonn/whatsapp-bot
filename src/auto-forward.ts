@@ -31,6 +31,18 @@ import { log } from "./logger.js";
 import { reescribirParaForward } from "./forward-rewriter.js";
 import type { ForwardMode, WspForward, WspTarget } from "./types.js";
 
+// Abstracción sobre el origen del mensaje. Permite que auto-forward acepte
+// tanto Baileys (WhatsApp) como GramJS (Telegram) sin duplicar el pipeline.
+// - WhatsApp: sourceType='whatsapp', baileysMsg presente (para literal mode).
+// - Telegram: sourceType='telegram', baileysMsg ausente (literal se manda
+//   como texto plano — no hay "forward flag" equivalente cross-plataforma).
+interface IncomingMessage {
+  sourceType: "whatsapp" | "telegram";
+  sourceJid: string;
+  text: string | null;
+  baileysMsg?: proto.IWebMessageInfo;
+}
+
 // State in-memory. Indexamos forwards por source_jid para lookup O(1)
 // en cada mensaje. Los targets los guardamos aparte para mapear jid↔id.
 interface Rule {
@@ -160,10 +172,49 @@ async function handleMessage(
   const isFromNewsletterCanal = fromJid.endsWith("@newsletter");
   if (!msg.key.fromMe && !isFromNewsletterCanal) return;
 
+  const incoming: IncomingMessage = {
+    sourceType: "whatsapp",
+    sourceJid: fromJid,
+    text: extraerTexto(msg),
+    baileysMsg: msg,
+  };
+
   for (const rule of rules) {
     // Fire and forget — cada regla corre en su propio scheduled forward.
-    void runForward(sock, rule, msg).catch((e) =>
+    void runForward(sock, rule, incoming).catch((e) =>
       log.error(`auto-forward: regla ${rule.id} falló:`, e instanceof Error ? e.message : e),
+    );
+  }
+}
+
+// Handler para mensajes que vienen desde Telegram (via telegram-client.ts).
+// Requiere que el WhatsApp sock esté vivo para poder publicar en el destino
+// (los destinos siguen siendo canales/grupos de WhatsApp por ahora).
+export function handleTelegramMessage(
+  getSock: () => WASocket | null,
+  evt: { sourceJid: string; sourceName: string; text: string | null },
+): void {
+  const rules = rulesBySourceJid.get(evt.sourceJid);
+  if (!rules || rules.length === 0) return;
+
+  const sock = getSock();
+  if (!sock) {
+    log.warn(
+      `auto-forward: mensaje Telegram de ${evt.sourceName} llegó pero WhatsApp está offline — skip`,
+    );
+    return;
+  }
+
+  const incoming: IncomingMessage = {
+    sourceType: "telegram",
+    sourceJid: evt.sourceJid,
+    text: evt.text,
+    // baileysMsg queda undefined — literal mode desde TG cae a text send
+  };
+
+  for (const rule of rules) {
+    void runForward(sock, rule, incoming).catch((e) =>
+      log.error(`auto-forward: regla ${rule.id} (TG) falló:`, e instanceof Error ? e.message : e),
     );
   }
 }
@@ -207,29 +258,25 @@ function reBuildMediaWithNewCaption(
 async function runForward(
   sock: WASocket,
   rule: Rule,
-  msg: proto.IWebMessageInfo,
+  incoming: IncomingMessage,
 ): Promise<void> {
   const delayMs = jitterMs(rule.delayMin, rule.delayMax);
   log.info(
-    `auto-forward: regla ${rule.id} [${rule.mode}] "${rule.sourceNombre}" → "${rule.destNombre}" en ${(delayMs / 1000).toFixed(1)}s`,
+    `auto-forward: regla ${rule.id} [${rule.mode}] [src:${incoming.sourceType}] "${rule.sourceNombre}" → "${rule.destNombre}" en ${(delayMs / 1000).toFixed(1)}s`,
   );
   await sleep(delayMs);
 
   try {
     if (rule.mode === "ia_rewrite") {
-      // Modo IA: solo publicamos si Claude puede extraer contenido útil.
+      // Modo IA: solo publicamos si hay texto útil que reescribir.
       // Casos:
-      //   - Sin texto (foto sola, sticker, audio) → SKIP (no publicamos).
-      //     El user quiere que el reenvío sea SOLO cuando hay contenido
-      //     accionable/apuesta, no cualquier cosa que postee el canal.
-      //   - Con texto: Claude decide. Si el prompt lo instruye a filtrar
-      //     y decide que no es apuesta, devuelve "[SKIP]" (literal) y
-      //     tampoco publicamos.
+      //   - Sin texto (foto sola, sticker, audio) → SKIP.
+      //   - Con texto: Claude decide. Si devuelve "[SKIP]" no publicamos.
       //   - Texto útil: reescribe + append dest_suffix.
-      const original = extraerTexto(msg);
+      const original = incoming.text;
       if (!original || original.trim().length === 0) {
         log.info(
-          `auto-forward: regla ${rule.id} sin texto (foto/sticker/audio) — skip`,
+          `auto-forward: regla ${rule.id} sin texto — skip`,
         );
         return;
       }
@@ -238,9 +285,6 @@ async function runForward(
         original,
         rule.iaPrompt,
       );
-      // Skip explícito de Claude — el prompt le da la opción de responder
-      // "[SKIP]" si el contenido no cumple criterios (ej: no es apuesta).
-      // Chequeo case-insensitive y tolerante a espacios/puntuación.
       const normalizado = reescrito.trim().toUpperCase();
       if (normalizado === "[SKIP]" || normalizado.startsWith("[SKIP]")) {
         log.info(
@@ -248,16 +292,25 @@ async function runForward(
         );
         return;
       }
-      // Append dest_suffix determinístico (disclaimer / afiliación).
-      // No pasa por Claude — texto exacto, siempre igual.
       const finalText = rule.destSuffix
         ? `${reescrito.trim()}\n\n${rule.destSuffix.trim()}`
         : reescrito;
       await sock.sendMessage(rule.destJid, { text: finalText });
     } else {
-      // Modo literal: forward tal cual, con etiqueta "Reenviado".
-      // (dest_suffix no se aplica en literal — el forward es copia exacta.)
-      await sock.sendMessage(rule.destJid, { forward: msg });
+      // Modo literal:
+      //   - Origen WhatsApp: forward tal cual (etiqueta "Reenviado" preservada).
+      //   - Origen Telegram: solo tenemos texto; lo mandamos como mensaje
+      //     nuevo. No hay forward-flag cross-plataforma en WhatsApp.
+      if (incoming.baileysMsg) {
+        await sock.sendMessage(rule.destJid, { forward: incoming.baileysMsg });
+      } else if (incoming.text) {
+        await sock.sendMessage(rule.destJid, { text: incoming.text });
+      } else {
+        log.info(
+          `auto-forward: regla ${rule.id} literal sin contenido reenviable — skip`,
+        );
+        return;
+      }
     }
     log.info(`auto-forward: regla ${rule.id} → ${rule.destNombre} ✓`);
 

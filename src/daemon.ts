@@ -21,7 +21,9 @@ import { connect } from "./baileys.js";
 import { syncTargets, type ChatStore } from "./sync-targets.js";
 import { variarMensaje } from "./rewriter.js";
 import { generarFraseDelDia, FRASE_PLACEHOLDER } from "./frase-motivacional.js";
-import { startAutoForward, rebindAutoForward } from "./auto-forward.js";
+import { startAutoForward, rebindAutoForward, handleTelegramMessage } from "./auto-forward.js";
+import { connectTelegram, telegramConfigured } from "./telegram-client.js";
+import { syncTelegramTargets } from "./telegram-sync-targets.js";
 import { startHealthzServer, setHealthInfoProvider, setAlertSender } from "./healthz.js";
 import { config } from "./config.js";
 import { log } from "./logger.js";
@@ -595,6 +597,41 @@ async function main() {
         void startAutoForward(sock).catch((e) =>
           log.error("auto-forward: start falló:", e instanceof Error ? e.message : e),
         );
+
+        // ── Telegram client (opcional, dispara pipeline auto-forward tmb) ──
+        // Se activa SOLO si TELEGRAM_API_ID + HASH + SESSION están seteados.
+        // Si falla, WhatsApp sigue funcionando sin ningún impacto (try/catch
+        // aísla cualquier crash del cliente Telegram del resto del daemon).
+        if (telegramConfigured()) {
+          void (async () => {
+            try {
+              const tgClient = await connectTelegram((evt) => {
+                // Bridge: cada mensaje Telegram entrante dispara el mismo
+                // pipeline que WhatsApp. getSock permite que el handler use
+                // el sock actual (puede haber sido swapped por reconexión).
+                handleTelegramMessage(() => currentSock, {
+                  sourceJid: evt.sourceJid,
+                  sourceName: evt.sourceName,
+                  text: evt.text,
+                });
+              });
+              if (tgClient) {
+                // Sync inicial + periódico de canales Telegram a wsp_targets.
+                setTimeout(() => void syncTelegramTargets().catch(() => {}), 5_000);
+                setInterval(() => void syncTelegramTargets().catch(() => {}), 15 * 60_000);
+              }
+            } catch (e) {
+              log.error(
+                "telegram: bootstrap falló (ignorado, WhatsApp sigue OK):",
+                e instanceof Error ? e.message : e,
+              );
+            }
+          })();
+        } else {
+          log.info(
+            "telegram: config incompleta — feature deshabilitada (solo WhatsApp activo)",
+          );
+        }
       } else {
         rebindAutoForward(sock);
       }
