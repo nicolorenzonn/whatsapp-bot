@@ -41,6 +41,12 @@ import type { WspTask, WspTarget, WspRunInsert, BotStatus } from "./types.js";
 // Crítico: esto corre ANTES de bootstrapAuth y de connect(). Si esperamos
 // a que Baileys cargue las creds malas y tire 401 de nuevo, perdimos un
 // ciclo (al menos 60-120s en Railway).
+// Signal cross-función: si maybeWipeAuthDir detectó .invalidated y wipeó,
+// bootstrapAuth no debe re-inyectar INITIAL_AUTH_B64 (esas creds son las
+// MISMAS que WhatsApp acaba de invalidar — cargarlas nos mete en el mismo
+// loop 401 → flag → wipe → bootstrap → 401). Se resetea entre boots.
+let bootstrapBypassed = false;
+
 function maybeWipeAuthDir() {
   const dir = config.authDir;
   const flag = join(dir, ".invalidated");
@@ -55,6 +61,11 @@ function maybeWipeAuthDir() {
   if (hasInvalidatedFlag) {
     log.warn(".invalidated flag presente → sesión anterior revocada por WhatsApp (401)");
     log.warn("Wipeando authDir antes de cargar Baileys para evitar crash loop");
+    // Prevenimos que bootstrapAuth re-inyecte las mismas creds inválidas
+    // desde INITIAL_AUTH_B64. Sin este bypass el flow era:
+    //   401 → flag → wipe → bootstrap (re-inyecta b64 viejo) → Baileys carga
+    //   creds inválidas → 401 → loop.
+    bootstrapBypassed = true;
   }
 
   if (existsSync(dir)) {
@@ -80,6 +91,14 @@ function bootstrapAuth() {
   // sesión vieja (aunque sea válida) saboteaba el flujo.
   if (process.env.WSP_FORCE_REPAIR === "1") {
     log.info("WSP_FORCE_REPAIR=1 → skipeo bootstrapAuth (queremos pairing limpio)");
+    return;
+  }
+  // Si el wipe fue por .invalidated flag, el b64 apunta a la misma sesión
+  // que WhatsApp acaba de revocar. Re-inyectarlo nos mete en loop 401 →
+  // ver comentario en maybeWipeAuthDir.
+  if (bootstrapBypassed) {
+    log.info(".invalidated flag detectado → skipeo bootstrapAuth (arranco desde cero para pairing).");
+    log.info("Cuando pairees exitosamente, actualizá INITIAL_AUTH_B64 en Railway con las creds nuevas.");
     return;
   }
   const dir = config.authDir;
