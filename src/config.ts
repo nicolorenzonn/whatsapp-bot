@@ -76,5 +76,24 @@ export const config = {
   alertToken: optional("WSP_ALERT_TOKEN"),
   alertDefaultJid: optional("WSP_ALERT_DEFAULT_JID"),
 
+  // ── Telegram (GramJS, MTProto) ───────────────────────────────────────────
+  // Solo se activa si TELEGRAM_API_ID + TELEGRAM_API_HASH están seteados.
+  //
+  // Cómo obtenerlas: https://my.telegram.org → API development tools →
+  // crear una app (Other) → copiar api_id (número) y api_hash (hex).
+  //
+  // Auth flow:
+  //   1. Primera vez: correr `npm run telegram-pair` local → pide teléfono
+  //      + código SMS + 2FA (si tiene) → imprime StringSession al final.
+  //   2. Copiás ese string y lo setteás como TELEGRAM_SESSION en Railway.
+  //   3. En producción el bot conecta con ese session (sin interacción).
+  //
+  // Si TELEGRAM_SESSION está vacío y estamos en Railway (sin TTY), el bot
+  // no arranca el cliente Telegram — loguea warning y sigue con WhatsApp
+  // solo. No es fatal.
+  telegramApiId: parseInt(optional("TELEGRAM_API_ID", "0")!, 10),
+  telegramApiHash: optional("TELEGRAM_API_HASH"),
+  telegramSession: optional("TELEGRAM_SESSION"),
+
   botVersion: "0.3.0",
 };
