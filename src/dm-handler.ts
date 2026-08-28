@@ -134,7 +134,14 @@ async function loadHistory(conversationId: number, limit = 10): Promise<Conversa
  */
 export async function handleDM(msg: proto.IWebMessageInfo, sock: WASocket | null = null): Promise<void> {
   const jid = msg.key.remoteJid;
-  if (!jid || !jid.endsWith("@s.whatsapp.net")) return;
+  // WhatsApp introdujo @lid (Local Identifier) en 2024/2025 como formato
+  // de identidad opaco para privacidad. Los DMs modernos llegan como
+  // @lid en vez de @s.whatsapp.net. Aceptamos ambos como DMs.
+  // Groups (@g.us), newsletters (@newsletter) y otros se descartan.
+  if (!jid) return;
+  const esDM =
+    jid.endsWith("@s.whatsapp.net") || jid.endsWith("@lid");
+  if (!esDM) return;
 
   // Ignoramos mensajes propios (fromMe) — el user puede estar respondiendo
   // desde su cel; no queremos procesarlos como si fueran del player.
@@ -143,8 +150,21 @@ export async function handleDM(msg: proto.IWebMessageInfo, sock: WASocket | null
   // Filtrar updates vacíos (read receipts, delivery, typing).
   if (!msg.message) return;
 
-  const telefono = phoneFromJid(jid);
-  if (!telefono) return;
+  // Para DMs @lid, el número real está en msg.key.senderPn (Baileys ~6.7.24+)
+  // o en participantAlt. Fallback: phoneFromJid del jid literal.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const keyAny = msg.key as any;
+  const jidRealParaLookup =
+    (typeof keyAny.senderPn === "string" && keyAny.senderPn) ||
+    (typeof keyAny.participantAlt === "string" && keyAny.participantAlt) ||
+    jid;
+  const telefono = phoneFromJid(jidRealParaLookup);
+  if (!telefono) {
+    log.warn(
+      `dm-handler: DM de ${jid} sin teléfono derivable — descarto (senderPn=${keyAny.senderPn ?? "?"}, participantAlt=${keyAny.participantAlt ?? "?"})`,
+    );
+    return;
+  }
 
   const texto = extraerTexto(msg);
   const mediaTipo = detectarMediaTipo(msg);
