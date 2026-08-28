@@ -95,7 +95,11 @@ async function upsertConversation(params: {
       afiliado: params.afiliado,
       last_inbound_at: new Date().toISOString(),
       unread_count: 1,
-      ia_mode: "shadow",
+      // 2026-08-27: default AUTO — la IA responde sola desde el primer
+      // mensaje respetando la filosofía cero-push del setter-brain.
+      // Solo escala a humano si action="escalate" o si el user cambia
+      // manualmente ia_mode desde la UI del CRM.
+      ia_mode: "auto",
       status: "active",
     })
     .select("id, ia_mode, status")
@@ -123,8 +127,12 @@ async function loadHistory(conversationId: number, limit = 10): Promise<Conversa
  * Entry point: procesa un mensaje entrante Baileys.
  * Solo actúa sobre DMs (jid @s.whatsapp.net). Otros JIDs se ignoran acá
  * (los maneja auto-forward.ts).
+ *
+ * @param sock socket Baileys — necesario para el auto-send cuando
+ *             conv.ia_mode='auto'. Si es null, solo guarda drafts (modo
+ *             shadow legacy).
  */
-export async function handleDM(msg: proto.IWebMessageInfo): Promise<void> {
+export async function handleDM(msg: proto.IWebMessageInfo, sock: WASocket | null = null): Promise<void> {
   const jid = msg.key.remoteJid;
   if (!jid || !jid.endsWith("@s.whatsapp.net")) return;
 
@@ -201,18 +209,68 @@ export async function handleDM(msg: proto.IWebMessageInfo): Promise<void> {
 
     // 5. Persistir el draft o escalar
     if (draft.action === "reply" && draft.text) {
-      // Guardamos como propuesta (ia_draft=1) — NO se envía todavía.
-      await sb.from("wsp_conversation_messages").insert({
-        user_id: config.userId,
-        conversation_id: conv.id,
-        direction: "out",
-        texto: draft.text,
-        ia_draft: 1,
-        ia_reasoning: draft.reasoning,
-        ia_confidence: draft.confidence,
-      });
-      // TODO: si conv.ia_mode === 'auto', enviar automáticamente aquí.
-      // Por ahora todo queda como draft para revisión humana.
+      // Threshold de confianza mínima para auto-send. Debajo de esto,
+      // queda como draft para revisión humana aunque conv esté en 'auto'.
+      const MIN_CONFIDENCE = 0.6;
+      const puedeAutoSend =
+        conv.ia_mode === "auto" &&
+        sock !== null &&
+        draft.confidence >= MIN_CONFIDENCE;
+
+      if (puedeAutoSend) {
+        try {
+          const res = await sock!.sendMessage(jid, { text: draft.text });
+          const wspMsgId = res?.key?.id ?? null;
+          await sb.from("wsp_conversation_messages").insert({
+            user_id: config.userId,
+            conversation_id: conv.id,
+            direction: "out",
+            wsp_message_id: wspMsgId,
+            texto: draft.text,
+            ia_draft: 0,           // fue enviado por IA, no queda como draft
+            ia_reasoning: draft.reasoning,
+            ia_confidence: draft.confidence,
+          });
+          await sb
+            .from("wsp_conversations")
+            .update({ last_outbound_at: new Date().toISOString() })
+            .eq("id", conv.id);
+          log.info(
+            `dm-handler: AUTO-SEND a ${telefono} — confidence=${draft.confidence.toFixed(2)}`,
+          );
+        } catch (e) {
+          log.error(
+            `dm-handler: auto-send fallo, guardo como draft:`,
+            e instanceof Error ? e.message : e,
+          );
+          // Fallback: guardar como draft para revisión humana
+          await sb.from("wsp_conversation_messages").insert({
+            user_id: config.userId,
+            conversation_id: conv.id,
+            direction: "out",
+            texto: draft.text,
+            ia_draft: 1,
+            ia_reasoning: `AUTO-SEND FAILED: ${draft.reasoning}`,
+            ia_confidence: draft.confidence,
+          });
+        }
+      } else {
+        // Modo shadow — o confidence bajo. Guarda como draft.
+        await sb.from("wsp_conversation_messages").insert({
+          user_id: config.userId,
+          conversation_id: conv.id,
+          direction: "out",
+          texto: draft.text,
+          ia_draft: 1,
+          ia_reasoning: draft.reasoning,
+          ia_confidence: draft.confidence,
+        });
+        if (conv.ia_mode === "auto" && draft.confidence < MIN_CONFIDENCE) {
+          log.info(
+            `dm-handler: confidence baja (${draft.confidence.toFixed(2)} < ${MIN_CONFIDENCE}), quedó como draft para revisión`,
+          );
+        }
+      }
     } else if (draft.action === "escalate") {
       await sb
         .from("wsp_conversations")
@@ -239,10 +297,14 @@ export function bindDMHandler(sock: WASocket): void {
   sock.ev.on("messages.upsert", async (ev) => {
     if (ev.type !== "notify") return;
     for (const msg of ev.messages) {
-      void handleDM(msg);
+      // Pasamos el sock al handler para que pueda hacer auto-send si la
+      // conversación está en modo 'auto' y la IA responde con confidence
+      // suficiente. Si el sock desaparece (reconexión), el handler cae
+      // gracefully a modo draft para no perder el mensaje.
+      void handleDM(msg, sock);
     }
   });
   log.info(
-    `dm-handler: activo (setter ${SETTER_ENABLED ? "ENABLED" : "DISABLED"} vía SETTER_ENABLED)`,
+    `dm-handler: activo (setter ${SETTER_ENABLED ? "ENABLED" : "DISABLED"} vía SETTER_ENABLED, auto-send habilitado para conversaciones ia_mode='auto')`,
   );
 }
