@@ -295,7 +295,20 @@ export async function handleDM(msg: proto.IWebMessageInfo, sock: WASocket | null
  */
 export function bindDMHandler(sock: WASocket): void {
   sock.ev.on("messages.upsert", async (ev) => {
-    if (ev.type !== "notify") return;
+    // DEBUG temporal: loguear TODO lo que llega para diagnosticar por qué
+    // no procesamos DMs entrantes. Sacar después.
+    log.info(
+      `dm-handler[DEBUG]: messages.upsert type="${ev.type}" msgs=${ev.messages.length}`,
+    );
+    for (const msg of ev.messages) {
+      log.info(
+        `dm-handler[DEBUG]: msg jid=${msg.key.remoteJid ?? "null"} fromMe=${msg.key.fromMe} id=${msg.key.id ?? "null"} hasMessage=${!!msg.message} keys=${Object.keys(msg.message ?? {}).join(",")}`,
+      );
+    }
+    if (ev.type !== "notify") {
+      log.info(`dm-handler[DEBUG]: skip por type != notify (type=${ev.type})`);
+      return;
+    }
     for (const msg of ev.messages) {
       // Pasamos el sock al handler para que pueda hacer auto-send si la
       // conversación está en modo 'auto' y la IA responde con confidence
