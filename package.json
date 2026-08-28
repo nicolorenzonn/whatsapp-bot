@@ -17,7 +17,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.91.1",
     "@supabase/supabase-js": "^2.104.1",
-    "baileys": "^6.7.18",
+    "baileys": "^6.7.24",
     "cron-parser": "^5.0.4",
     "dotenv": "^16.4.5",
     "input": "^1.0.1",
