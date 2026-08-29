@@ -542,7 +542,9 @@ async function main() {
   });
 
   const bootSock = await connect({
-    printQR: false,
+    // Sin pairingPhone → imprimimos QR en logs (ASCII) para escanear.
+    // Con pairingPhone → suprimimos QR y pedimos pairing code cada 65s.
+    printQR: !config.pairingPhone,
     // Si no hay creds Y tenemos pairingPhone, baileys.ts pide el pairing
     // code INMEDIATAMENTE después de makeWASocket (antes que entre en QR
     // mode) y lo regenera cada 65s hasta conectarse.
