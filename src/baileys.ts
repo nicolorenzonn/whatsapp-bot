@@ -121,6 +121,10 @@ export async function connect(opts: ConnectOptions = {}): Promise<WASocket> {
     if (qr && opts.printQR && !opts.pairingPhone) {
       log.info("Escaneá este QR desde WhatsApp → Dispositivos vinculados:");
       qrcode.generate(qr, { small: true });
+      // También logueamos el string raw en una línea aparte — cuando el bot
+      // corre en Railway el ASCII se distorsiona por line-wrapping, así que
+      // podemos generar una imagen desde el raw string en la máquina local.
+      log.info(`QR_RAW: ${qr}`);
     }
     // En modo pairing-code, ignoramos silenciosamente los QR subsiguientes.
 
