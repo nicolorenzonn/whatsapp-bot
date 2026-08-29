@@ -382,6 +382,7 @@ async function tick(): Promise<void> {
       .from("wsp_tasks")
       .select("*")
       .eq("user_id", config.userId)
+      .eq("bot_mode", config.botMode)
       .eq("pausada", 0)
       .not("next_run", "is", null)
       .lte("next_run", nowIso)
@@ -473,6 +474,7 @@ async function refreshNextRunFor(taskId: number): Promise<void> {
     .select("*")
     .eq("id", taskId)
     .eq("user_id", config.userId)
+    .eq("bot_mode", config.botMode)
     .single();
   if (error || !data) return;
   const task = data as WspTask;

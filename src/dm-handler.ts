@@ -20,7 +20,11 @@ import { sb } from "./supabase.js";
 import { config } from "./config.js";
 import { log } from "./logger.js";
 import { lookupPlayerByPhone, phoneFromJid, isVipSegment } from "./player-lookup.js";
-import { generarDraftRespuesta, type ConversationTurn } from "./setter-brain.js";
+import { generarDraftRespuesta as brainCasino, type ConversationTurn } from "./setter-brain.js";
+import { generarDraftRespuesta as brainInflamoff } from "./setter-brain-inflamoff.js";
+
+const generarDraftRespuesta =
+  config.botMode === "inflamoff" ? brainInflamoff : brainCasino;
 
 const SETTER_ENABLED = process.env.SETTER_ENABLED === "1";
 
@@ -61,6 +65,7 @@ async function upsertConversation(params: {
     .from("wsp_conversations")
     .select("id, ia_mode, status")
     .eq("user_id", config.userId)
+    .eq("bot_mode", config.botMode)
     .eq("jid", params.jid)
     .maybeSingle();
 
@@ -88,6 +93,7 @@ async function upsertConversation(params: {
     .from("wsp_conversations")
     .insert({
       user_id: config.userId,
+      bot_mode: config.botMode,
       jid: params.jid,
       telefono: params.telefono,
       jugador_id: params.jugadorId,
@@ -208,7 +214,10 @@ export async function handleDM(msg: proto.IWebMessageInfo, sock: WASocket | null
     // no_vip y desconocidos los dejamos para escalación manual.
     if (!SETTER_ENABLED) return;
     if (conv.ia_mode === "off") return;
-    if (!isVip) {
+    // Solo el bot casino filtra por VIP — Inflamoff responde a todo cliente
+    // porque no hay concepto de "VIP" en cosmética; toda persona que escribe
+    // por DM es un lead válido a atender.
+    if (config.botMode === "casino" && !isVip) {
       log.debug(`dm-handler: ${telefono} no es VIP (${lookup.segment}), skip IA`);
       return;
     }

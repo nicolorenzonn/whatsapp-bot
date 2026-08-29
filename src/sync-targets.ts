@@ -235,6 +235,7 @@ export async function syncTargets(
     .from("wsp_targets")
     .select("jid, nombre, activo")
     .eq("user_id", config.userId)
+    .eq("bot_mode", config.botMode)
     .in("jid", chats.map((c) => c.jid));
   const nombreExistente = new Map<string, string>();
   const activoExistente = new Map<string, number>();
@@ -257,6 +258,7 @@ export async function syncTargets(
         : c.nombre;
     return {
       user_id: config.userId,
+      bot_mode: config.botMode,
       jid: c.jid,
       tipo: c.tipo,
       nombre: finalNombre,
@@ -272,7 +274,7 @@ export async function syncTargets(
 
   const { error, count } = await sb
     .from("wsp_targets")
-    .upsert(payload, { onConflict: "user_id,jid", count: "exact" });
+    .upsert(payload, { onConflict: "user_id,bot_mode,jid", count: "exact" });
 
   if (error) {
     log.error("Error en upsert de wsp_targets:", error.message);

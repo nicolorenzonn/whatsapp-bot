@@ -95,5 +95,12 @@ export const config = {
   telegramApiHash: optional("TELEGRAM_API_HASH"),
   telegramSession: optional("TELEGRAM_SESSION"),
 
+  // Modo del bot — segmenta wsp_tasks/wsp_targets/wsp_conversations por
+  // marca así podemos correr múltiples instancias con el mismo user_id
+  // pero cada una sirviendo a un cerebro y un número WhatsApp distintos.
+  // 'casino' (default) = setter-brain Sportsbet
+  // 'inflamoff' = setter-brain Inflamoff (código descuento, productos)
+  botMode: optional("BOT_MODE", "casino")!,
+
   botVersion: "0.3.0",
 };
