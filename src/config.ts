@@ -102,5 +102,15 @@ export const config = {
   // 'inflamoff' = setter-brain Inflamoff (código descuento, productos)
   botMode: optional("BOT_MODE", "casino")!,
 
+  // Lista de números / JIDs del owner (Nico) para NUNCA auto-responderle.
+  // El owner tiene sus propios bots (Nika/Eden/CarbonWhite/Inflamoff/casino)
+  // hablando entre sí genera loops eternos. Filtro por teléfono normalizado
+  // y por JID literal (@lid es formato de contactos anónimos post-2025).
+  // Env var comma-separated: WSP_OWNER_JIDS=5493434650746,266086310240396@lid
+  ownerJids: (optional("WSP_OWNER_JIDS", "5493434650746,266086310240396@lid")!)
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
+
   botVersion: "0.3.0",
 };

@@ -214,6 +214,15 @@ export async function handleDM(msg: proto.IWebMessageInfo, sock: WASocket | null
     // no_vip y desconocidos los dejamos para escalación manual.
     if (!SETTER_ENABLED) return;
     if (conv.ia_mode === "off") return;
+    // BLACKLIST del owner (Nico). Nunca auto-responder aunque conv esté
+    // en 'auto'. Prevención de loops entre bots (Nika/Eden/Inflamoff/casino).
+    const ownerMatch = config.ownerJids.some(
+      (o) => jid === o || jid.includes(o) || telefono === o || o.includes(telefono),
+    );
+    if (ownerMatch) {
+      log.info(`dm-handler: ${jid} matchea WSP_OWNER_JIDS — skip IA (loop prevention)`);
+      return;
+    }
     // Solo el bot casino filtra por VIP — Inflamoff responde a todo cliente
     // porque no hay concepto de "VIP" en cosmética; toda persona que escribe
     // por DM es un lead válido a atender.
