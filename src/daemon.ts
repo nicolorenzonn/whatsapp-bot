@@ -25,6 +25,7 @@ import { startAutoForward, rebindAutoForward, handleTelegramMessage } from "./au
 import { connectTelegram, telegramConfigured } from "./telegram-client.js";
 import { syncTelegramTargets } from "./telegram-sync-targets.js";
 import { bindDMHandler } from "./dm-handler.js";
+import { startCampaignSender } from "./campaign-sender.js";
 import { startHealthzServer, setHealthInfoProvider, setAlertSender } from "./healthz.js";
 import { config } from "./config.js";
 import { log } from "./logger.js";
@@ -597,6 +598,11 @@ async function main() {
       // SETTER_ENABLED=1 además genera drafts IA en modo shadow para VIPs.
       // Se re-engancha en cada reconexión (idempotente — solo registra listener).
       bindDMHandler(sock);
+
+      // Campaign sender — procesa broadcasts masivos a wsp_campaign_leads
+      // en modo pacing (respeta daily_cap + jitter + hora hábil + auto-pause).
+      // Solo actúa sobre campañas con status='active'. Idempotente en reconexión.
+      startCampaignSender(() => currentSock);
 
       // Auto-reenvío canal → comunidad. La primera vez (autoForwardStarted=false)
       // arranca el sistema entero (carga reglas + suscripción a Realtime +
