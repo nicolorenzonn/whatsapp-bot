@@ -83,12 +83,12 @@ function jitterMs(min: number, max: number): number {
 async function pickPendingLead(campaignId: number): Promise<Lead | null> {
   // Agarra un lead pending random (evita orden estricto → más humano).
   // Uso OFFSET random como aproximación — con miles de leads es OK.
-  const { data: count } = await sb
+  const { count } = await sb
     .from("wsp_campaign_leads")
     .select("id", { count: "exact", head: true })
     .eq("campaign_id", campaignId)
     .eq("status", "pending");
-  const total = (count as unknown as { count?: number })?.count ?? 0;
+  const total = count ?? 0;
   if (total === 0) return null;
   const offset = Math.floor(Math.random() * total);
   const { data } = await sb
