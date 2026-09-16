@@ -274,6 +274,7 @@ async function tick(sock: WASocket): Promise<void> {
       .from("wsp_campaigns")
       .select("*")
       .eq("user_id", config.userId)
+      .eq("bot_mode", config.botMode)
       .eq("status", "active");
     if (error) {
       log.error("campaign-sender: error leyendo campaigns:", error.message);
