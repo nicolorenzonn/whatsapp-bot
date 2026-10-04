@@ -87,6 +87,17 @@ export async function variarMensaje(
         "• Si hay un link/URL, lo dejás IGUAL, byte por byte, en una posición razonable del texto.\n" +
         "• Mantenés emojis y formato de WhatsApp (*negrita*, _itálica_, saltos de línea).\n" +
         "• Largo similar al original (±30%), no lo alargues de gusto.\n\n" +
+        "REGLAS DE IDENTIDAD (SUPER CRÍTICAS — leer BIEN antes de reescribir):\n" +
+        "• El mensaje es OUTBOUND de la marca al cliente. Vos reescribís el saludo de alguien " +
+          "que ESCRIBE A un cliente, NO una respuesta del cliente.\n" +
+        "• Si el original dice \"Hola X! Te habla Y, de [marca]…\": X es el CLIENTE que recibe, " +
+          "Y es la PERSONA/MARCA que firma. Reescribí manteniendo esa dirección (saludo a X, " +
+          "firma Y). NUNCA inviertas: NO escribas \"Hola Y!\" — eso sería tratar al firmante " +
+          "como destinatario.\n" +
+        "• Si el original tiene un placeholder tipo {nombre} / {name} / [cliente] sin reemplazar, " +
+          "dejalo tal cual con las mismas llaves. NO lo rellenes con el nombre del firmante.\n" +
+        "• No cambies el nombre del firmante ni inventes uno distinto. Si firma \"Sol\", sigue " +
+          "firmando \"Sol\".\n\n" +
         "OBJETIVO: que cada envío sea distinto al anterior (variás vocabulario y orden de frases) " +
         "pero suene siempre como una persona argentina escribiendo, no como un bot.\n\n" +
         "Devolvés SOLO el mensaje reescrito. Sin comillas, sin explicaciones, sin prefijos tipo " +
@@ -103,6 +114,14 @@ export async function variarMensaje(
           content:
             "ey! salió el ebook nuevo de inversiones 🙌 te lo dejo gratis acá: https://ej.com/ebook " +
             "— fijate que está re completo",
+        },
+        {
+          role: "user",
+          content: "Hola Caro! Te habla Sol, la dueña de Inflamoff. Todo bien? ✨",
+        },
+        {
+          role: "assistant",
+          content: "Hola Caro! ¿Todo bien? Te escribe Sol, la dueña de Inflamoff ✨",
         },
         { role: "user", content: original },
       ],
