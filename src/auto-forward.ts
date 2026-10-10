@@ -164,13 +164,24 @@ async function handleMessage(
 
   // Regla de aceptación:
   //   - fromMe=true → siempre aceptamos (usuario posteó en un target propio)
-  //   - fromMe=false → aceptamos SOLO si el source es un @newsletter (canal
-  //     que seguimos). En canales solo el owner postea, así que el mensaje
-  //     es del canal fuente autorizado. En grupos ajenos con fromMe=false
-  //     descartamos — no queremos reenviar mensajes de otras personas en
-  //     grupos donde participamos sin ser owners.
+  //   - fromMe=false + source @newsletter → aceptamos (canal que seguimos,
+  //     solo el owner postea).
+  //   - fromMe=false + source @g.us (grupo ajeno) → aceptamos SOLO si todas
+  //     las reglas aplicables son ia_rewrite. Claude filtra el ruido del
+  //     grupo (saludos, memes) devolviendo "[SKIP]" y solo publica cuando
+  //     hay contenido útil (ej: pronósticos deportivos en grupos de tipsters).
   const isFromNewsletterCanal = fromJid.endsWith("@newsletter");
-  if (!msg.key.fromMe && !isFromNewsletterCanal) return;
+  const isFromGroup = fromJid.endsWith("@g.us");
+  const allRulesAreIaRewrite = rules.every((r) => r.mode === "ia_rewrite");
+  if (!msg.key.fromMe) {
+    if (isFromNewsletterCanal) {
+      // ok
+    } else if (isFromGroup && allRulesAreIaRewrite) {
+      // ok — Claude filtrará con [SKIP] si no es contenido útil
+    } else {
+      return;
+    }
+  }
 
   const incoming: IncomingMessage = {
     sourceType: "whatsapp",
